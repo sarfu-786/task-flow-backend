@@ -1,0 +1,63 @@
+{
+  "users": [
+    {
+      "_id": "64e8a10a079f3500000000",
+      "name": "Asif",
+      "email": "asif@gmail.com",
+      "username": "asif",
+      "password": "$2a$10$A2cMKMbhghZcG221nzZ5F.eSLDr/IihpaZdGdNXZtUmY2ZDRHvn8.",
+      "role": "User",
+      "department": "Operations",
+      "avatar": "",
+      "createdAt": "2026-09-01T07:19:00.614Z"
+    },
+    {
+      "_id": "64e8a10676ef8300000000",
+      "name": "Sarfaraj Ahmad",
+      "email": "sarfu@gmail.com",
+      "username": "sarfu",
+      "password": "$2a$10$bq0FAfcr6FG5cA836jZOeOTh/LTTbg9JTGUDpa2QF87Jq2MnAUySC",
+      "role": "Manager",
+      "department": "Management",
+      "avatar": "",
+      "createdAt": "2026-09-01T07:16:43.872Z"
+    }
+  ],
+  "tasks": [
+    {
+      "_id": "64e8b249f5e88b00000000",
+      "taskType": "social media",
+      "description": "Handle the social media account",
+      "expectedDate": "2026-09-08T00:00:00.000Z",
+      "remark": "",
+      "completionRemark": "The task is done within the given time",
+      "status": "Completed",
+      "priority": "Medium",
+      "assignedTo": "Asif",
+      "assignedBy": "Sarfaraj Ahmad (Manager)",
+      "user": "64e8a10a079f3500000000",
+      "createdAt": "2026-09-01T07:20:35.848Z",
+      "updatedAt": "2026-09-01T07:22:00.530Z",
+      "completedAt": "2026-09-01T07:22:00.530Z"
+    }
+  ],
+  "notifications": [
+    {
+      "_id": "64e8c33f19957900000000",
+      "user": "64e8a10a079f3500000000",
+      "userName": "Asif",
+      "userAvatar": "",
+      "taskId": "64e8b249f5e88b00000000",
+      "taskDescription": "Handle the social media account",
+      "taskType": "social media",
+      "type": "task_completed",
+      "title": "Task Completed: Asif",
+      "message": "Asif has completed \"Handle the social media account\"",
+      "remark": "The task is done within the given time",
+      "isRead": true,
+      "forRole": "Manager",
+      "createdAt": "2026-09-01T07:22:00.531Z"
+    }
+  ],
+  "savedAt": "2026-09-01T07:23:42.495Z"
+}

@@ -1,0 +1,6 @@
+{
+  "watch": ["server.js", "routes/", "models/", "middleware/", "config/", "seedData.js"],
+  "ext": "js",
+  "ignore": ["node_modules/", "data/", "*.log", ".git/"],
+  "delay": "1000"
+}
