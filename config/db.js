@@ -58,19 +58,20 @@ const fallbackStore = {
 };
 
 const connectDB = async () => {
-  const mongoURI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/taskflow_db';
+  const mongoURI =
+    process.env.MONGODB_URI ||
+    'mongodb+srv://sarfrajahamad068_db_user:NTAPWfhRqpTYZumh@cluster0.p31lill.mongodb.net/taskflow_db?retryWrites=true&w=majority&appName=Cluster0';
 
   try {
     mongoose.set('strictQuery', false);
-    // Ignore error events on mongoose connection so fallback store runs stably
-    mongoose.connection.on('error', () => { });
     await mongoose.connect(mongoURI, {
-      serverSelectionTimeoutMS: 1500,
+      serverSelectionTimeoutMS: 25000,
     });
-    console.log(`[Database] MongoDB Connected Successfully to ${mongoURI}`);
+    console.log(`[Database] MongoDB Connected Successfully to Atlas DB: ${mongoose.connection.name}`);
+    fallbackStore.isFallback = false;
     return { isFallback: false };
   } catch (error) {
-    console.warn(`[Database] Local MongoDB server not reachable at ${mongoURI}`);
+    console.error(`[Database Error] MongoDB connection failed:`, error.message);
     console.log(`[Database] Initializing persistent file-backed local database store...`);
     fallbackStore.isFallback = true;
     return { isFallback: true };

@@ -22,12 +22,12 @@ const userSchema = new mongoose.Schema({
     lowercase: true,
     trim: true,
   },
-  password: {
-    type: String,
-    required: [true, 'Please provide a password'],
-    minlength: 6,
-    select: false,
-  },
+    password: {
+      type: String,
+      required: [true, 'Please provide a password'],
+      minlength: 4,
+      select: false,
+    },
   role: {
     type: String,
     enum: ['Manager', 'Executive', 'Administrator', 'User'],
