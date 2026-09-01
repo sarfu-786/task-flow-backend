@@ -3,13 +3,13 @@ const bcrypt = require('bcryptjs');
 const initialUsers = [
   {
     _id: '64e8a1000000000000000001',
-    name: 'Sarfu',
-    email: 'sarfu@gmail.com',
-    username: 'sarfu',
+    name: 'Sarfaraj Ahmad',
+    email: 'sarfrajahamad068@gmail.com',
+    username: 'sarfraj',
     password: '998466',
     role: 'Manager',
-    department: 'Project Operations',
-    avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
+    department: 'Management',
+    avatar: '',
     createdAt: new Date('2026-01-15T09:00:00Z'),
   },
   {
@@ -303,15 +303,92 @@ const initialNotifications = [
 
 const seedDatabase = async (isFallback, User, Task, fallbackStore) => {
   try {
+    const managerEmail = 'sarfrajahamad068@gmail.com';
+    const managerPassword = '998466';
+
     if (isFallback) {
       const isLoaded = fallbackStore.loadFromFile();
-      if (!isLoaded) {
-        fallbackStore.users = [];
-        fallbackStore.tasks = [];
-        fallbackStore.notifications = [];
+      if (!isLoaded || !fallbackStore.users || fallbackStore.users.length === 0) {
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(managerPassword, salt);
+        fallbackStore.users = [
+          {
+            _id: '64e8a10676ef8300000000',
+            name: 'Sarfaraj Ahmad',
+            email: managerEmail,
+            username: 'sarfraj',
+            password: hashedPassword,
+            role: 'Manager',
+            department: 'Management',
+            avatar: '',
+            createdAt: new Date(),
+          }
+        ];
+        fallbackStore.tasks = fallbackStore.tasks || [];
+        fallbackStore.notifications = fallbackStore.notifications || [];
+        fallbackStore.saveToFile();
+      } else {
+        // Ensure default manager exists and has updated credentials
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(managerPassword, salt);
+        const managerIndex = fallbackStore.users.findIndex(
+          (u) => u.email.toLowerCase() === managerEmail.toLowerCase() || u.role === 'Manager'
+        );
+
+        if (managerIndex !== -1) {
+          fallbackStore.users[managerIndex].name = 'Sarfaraj Ahmad';
+          fallbackStore.users[managerIndex].email = managerEmail;
+          fallbackStore.users[managerIndex].username = 'sarfraj';
+          fallbackStore.users[managerIndex].password = hashedPassword;
+          fallbackStore.users[managerIndex].role = 'Manager';
+          fallbackStore.users[managerIndex].department = 'Management';
+        } else {
+          fallbackStore.users.unshift({
+            _id: '64e8a10676ef8300000000',
+            name: 'Sarfaraj Ahmad',
+            email: managerEmail,
+            username: 'sarfraj',
+            password: hashedPassword,
+            role: 'Manager',
+            department: 'Management',
+            avatar: '',
+            createdAt: new Date(),
+          });
+        }
         fallbackStore.saveToFile();
       }
-      console.log(`[Storage] Clean database active: ${fallbackStore.users.length} users, ${fallbackStore.tasks.length} tasks, and ${fallbackStore.notifications.length} notifications.`);
+      console.log(`[Storage] Default manager (${managerEmail}) verified in persistent store.`);
+    } else {
+      // MongoDB initialization
+      if (User) {
+        let manager = await User.findOne({ email: managerEmail });
+        if (!manager) {
+          manager = await User.findOne({ role: 'Manager' });
+          if (manager) {
+            manager.name = 'Sarfaraj Ahmad';
+            manager.email = managerEmail;
+            manager.username = 'sarfraj';
+            manager.password = managerPassword;
+            manager.role = 'Manager';
+            manager.department = 'Management';
+            await manager.save();
+          } else {
+            await User.create({
+              name: 'Sarfaraj Ahmad',
+              email: managerEmail,
+              username: 'sarfraj',
+              password: managerPassword,
+              role: 'Manager',
+              department: 'Management',
+            });
+          }
+        } else {
+          manager.password = managerPassword;
+          manager.role = 'Manager';
+          await manager.save();
+        }
+        console.log(`[Database] Default manager (${managerEmail}) verified in MongoDB.`);
+      }
     }
   } catch (error) {
     console.error('[Storage Init Error]:', error.message);

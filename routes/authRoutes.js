@@ -58,17 +58,9 @@ router.post('/register', async (req, res) => {
       });
     }
 
-    // Determine clean role: 'Manager' or 'User'
-    const allowedRoles = ['Manager', 'Executive', 'Administrator', 'User'];
-    let cleanRole = 'User';
-    if (role && (allowedRoles.includes(role) || role.toLowerCase() === 'manager')) {
-      cleanRole = role.toLowerCase() === 'manager' ? 'Manager' : role;
-    }
-
-    // Determine clean department
-    const cleanDept = department && department.trim()
-      ? department.trim()
-      : (cleanRole === 'Manager' ? 'Management' : 'Operations');
+    // Public registration always registers regular employees ('User')
+    const cleanRole = 'User';
+    const cleanDept = department && department.trim() ? department.trim() : 'Operations';
 
     // Determine or generate a unique clean username
     let cleanUsername = username && username.trim()
