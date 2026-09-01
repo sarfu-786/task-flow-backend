@@ -58,22 +58,30 @@ const fallbackStore = {
 };
 
 const connectDB = async () => {
-  const mongoURI =
-    process.env.MONGODB_URI ||
-    'mongodb+srv://sarfrajahamad068_db_user:NTAPWfhRqpTYZumh@cluster0.p31lill.mongodb.net/taskflow_db?retryWrites=true&w=majority&appName=Cluster0';
+  let mongoURI = process.env.MONGODB_URI;
+
+  // If MONGODB_URI is not provided or points to local address on remote/cloud host
+  if (!mongoURI || mongoURI.includes('127.0.0.1') || mongoURI.includes('localhost') || !mongoURI.includes('mongodb+srv')) {
+    mongoURI = 'mongodb+srv://sarfrajahamad068_db_user:NTAPWfhRqpTYZumh@cluster0.p31lill.mongodb.net/taskflow_db?retryWrites=true&w=majority&appName=Cluster0';
+  } else if (mongoURI.includes('mongodb+srv://') && !mongoURI.includes('.mongodb.net/')) {
+    mongoURI = mongoURI.replace('.mongodb.net/?', '.mongodb.net/taskflow_db?');
+  }
 
   try {
     mongoose.set('strictQuery', false);
+    console.log(`[Database] Attempting connection to MongoDB Atlas...`);
     await mongoose.connect(mongoURI, {
-      serverSelectionTimeoutMS: 25000,
+      serverSelectionTimeoutMS: 30000,
     });
     console.log(`[Database] MongoDB Connected Successfully to Atlas DB: ${mongoose.connection.name}`);
     fallbackStore.isFallback = false;
+    fallbackStore.dbError = null;
     return { isFallback: false };
   } catch (error) {
     console.error(`[Database Error] MongoDB connection failed:`, error.message);
     console.log(`[Database] Initializing persistent file-backed local database store...`);
     fallbackStore.isFallback = true;
+    fallbackStore.dbError = error.message;
     return { isFallback: true };
   }
 };

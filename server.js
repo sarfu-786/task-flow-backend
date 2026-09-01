@@ -27,13 +27,17 @@ app.use('/api/tasks', require('./routes/taskRoutes'));
 app.use('/api/users', require('./routes/userRoutes'));
 app.use('/api/notifications', require('./routes/notificationRoutes'));
 
+const mongoose = require('mongoose');
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'OK',
     timestamp: new Date(),
-    database: fallbackStore.isFallback ? 'In-Memory / Persistent Store' : 'MongoDB Connected',
-    tasksCount: fallbackStore.isFallback ? fallbackStore.tasks.length : 'Live DB',
+    database: fallbackStore.isFallback ? 'In-Memory / Persistent Store' : 'MongoDB Atlas Live Connected',
+    dbName: mongoose.connection ? mongoose.connection.name : 'none',
+    readyState: mongoose.connection ? mongoose.connection.readyState : 0,
+    dbError: fallbackStore.dbError || null,
   });
 });
 
