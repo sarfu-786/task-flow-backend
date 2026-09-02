@@ -1,30 +1,6 @@
 {
   "users": [
     {
-      "_id": "6a97eb565b173569426c79dc",
-      "name": "Abdullah",
-      "email": "abdu@gmail.com",
-      "username": "abdu",
-      "password": "$2a$10$IKveOtpwWXGeVCjPng/LAempyovsBQm1yyOiHHXkTY/N11UUzc6xq",
-      "role": "User",
-      "department": "Backend",
-      "avatar": "",
-      "status": "Approved",
-      "createdAt": "2026-09-02T09:24:38.407Z"
-    },
-    {
-      "_id": "6a97ea735b173569426c796e",
-      "name": "Atlas Test User",
-      "email": "atlas_verify_1788340851704@gmail.com",
-      "username": "atlas_verify_1788340851704",
-      "password": "$2a$10$/MalyMT5B./M4GO51aMrLefGGvw/dPF2RB.IftktOQdnnKz09Rrgy",
-      "role": "User",
-      "department": "Backend",
-      "avatar": "",
-      "status": "Approved",
-      "createdAt": "2026-09-02T09:20:51.821Z"
-    },
-    {
       "_id": "6a96a9a1635360bf94f90ab3",
       "name": "Sarfaraj Ahmad",
       "email": "sarfrajahamad068@gmail.com",
@@ -95,10 +71,35 @@
       "avatar": "",
       "status": "Rejected",
       "createdAt": "2026-09-02T07:37:12.598Z"
+    },
+    {
+      "_id": "6a97eb565b173569426c79dc",
+      "name": "Abdullah",
+      "email": "abdu@gmail.com",
+      "username": "abdu",
+      "password": "$2a$10$IKveOtpwWXGeVCjPng/LAempyovsBQm1yyOiHHXkTY/N11UUzc6xq",
+      "role": "User",
+      "department": "Backend",
+      "avatar": "",
+      "status": "Approved",
+      "createdAt": "2026-09-02T09:24:38.407Z"
+    },
+    {
+      "_id": "6a97efa6f2713eac1ebab815",
+      "name": "Atlas Test User",
+      "email": "atlas_verify_1788340851704@gmail.com",
+      "username": "atlas_verify_1788340851704",
+      "password": "$2a$10$/MalyMT5B./M4GO51aMrLefGGvw/dPF2RB.IftktOQdnnKz09Rrgy",
+      "role": "User",
+      "department": "Backend",
+      "avatar": "",
+      "status": "Approved",
+      "createdAt": "2026-09-02T09:20:51.821Z"
     }
   ],
   "tasks": [
     {
+      "_id": "6a97eb1f5b173569426c79c9",
       "taskType": "social media",
       "description": "handle the social media account",
       "expectedDate": "2026-09-05T00:00:00.000Z",
@@ -111,23 +112,23 @@
       "completionRemark": "",
       "createdAt": "2026-09-02T09:23:43.249Z",
       "updatedAt": "2026-09-02T09:23:43.251Z",
-      "_id": "6a97eb1f5b173569426c79c9",
       "__v": 0
     },
     {
+      "_id": "6a97efa6f2713eac1ebab819",
       "taskType": "backend work",
       "description": "Database verification test task 1788340852348",
       "expectedDate": "2026-09-02T09:20:52.348Z",
       "remark": "Testing MongoDB Atlas persistence",
       "status": "To Do",
       "priority": "Medium",
-      "user": "6a97ea735b173569426c796e",
+      "user": "6a97efa6f2713eac1ebab815",
       "assignedTo": "Atlas Test User",
       "assignedBy": "Sarfaraj Ahmad (Manager)",
       "completionRemark": "",
+      "completedAt": null,
       "createdAt": "2026-09-02T09:20:52.586Z",
-      "updatedAt": "2026-09-02T09:20:52.587Z",
-      "_id": "6a97ea745b173569426c7977",
+      "updatedAt": "2026-09-02T09:43:02.236Z",
       "__v": 0
     },
     {
@@ -165,6 +166,63 @@
     }
   ],
   "notifications": [
+    {
+      "_id": "6a97eb565b173569426c79de",
+      "recipientName": "",
+      "userName": "Abdullah",
+      "userAvatar": "",
+      "assignedBy": "",
+      "taskDescription": "Registration Request: Abdullah (abdu@gmail.com)",
+      "taskType": "general",
+      "type": "user_registered",
+      "title": "New User Registration Awaiting Approval",
+      "message": "Abdullah (abdu@gmail.com) from department \"Backend\" has registered and is awaiting your approval.",
+      "remark": "",
+      "isRead": true,
+      "forRole": "Manager",
+      "createdAt": "2026-09-02T09:24:38.618Z",
+      "__v": 0
+    },
+    {
+      "_id": "6a97eb1f5b173569426c79cb",
+      "user": "6a96a9a1635360bf94f90ab3",
+      "recipientUser": "6a97bed211d217e638156d21",
+      "recipientName": "Shoaib Khan",
+      "userName": "Sarfaraj Ahmad",
+      "userAvatar": "",
+      "assignedBy": "Sarfaraj Ahmad (Manager)",
+      "taskId": "6a97eb1f5b173569426c79c9",
+      "taskDescription": "handle the social media account",
+      "taskType": "social media",
+      "type": "task_assigned",
+      "title": "New Task Assigned by Sarfaraj Ahmad (Manager)",
+      "message": "Sarfaraj Ahmad (Manager) assigned you a task: \"handle the social media account\"",
+      "remark": "Instructions: do it asap",
+      "isRead": false,
+      "forRole": "User",
+      "createdAt": "2026-09-02T09:23:43.323Z",
+      "__v": 0
+    },
+    {
+      "_id": "6a97ea745b173569426c7979",
+      "user": "6a96a9a1635360bf94f90ab3",
+      "recipientUser": "6a97ea735b173569426c796e",
+      "recipientName": "Atlas Test User",
+      "userName": "Sarfaraj Ahmad",
+      "userAvatar": "",
+      "assignedBy": "Sarfaraj Ahmad (Manager)",
+      "taskId": "6a97ea745b173569426c7977",
+      "taskDescription": "Database verification test task 1788340852348",
+      "taskType": "backend work",
+      "type": "task_assigned",
+      "title": "New Task Assigned by Sarfaraj Ahmad (Manager)",
+      "message": "Sarfaraj Ahmad (Manager) assigned you a task: \"Database verification test task 1788340852348\"",
+      "remark": "Instructions: Testing MongoDB Atlas persistence",
+      "isRead": false,
+      "forRole": "User",
+      "createdAt": "2026-09-02T09:20:52.672Z",
+      "__v": 0
+    },
     {
       "_id": "6a97cd4e61af686645cea309",
       "user": "6a96a9a1635360bf94f90ab3",
@@ -206,5 +264,5 @@
       "__v": 0
     }
   ],
-  "savedAt": "2026-09-02T09:25:03.159Z"
+  "savedAt": "2026-09-02T10:17:55.719Z"
 }
