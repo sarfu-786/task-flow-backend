@@ -17,7 +17,7 @@
       "name": "Asif",
       "email": "asif@gmail.com",
       "username": "asif",
-      "password": "$2a$10$ySvxXwZR7K32t13BCZWnXOYWxemfVfI6HQ64xY9fP.V945o.SNxGm",
+      "password": "$2a$10$bfiB1Az8KBvdjPj8Y3wQz.UwZO8AveDfe3Y/EPJjh8AQ5mqjbSFwG",
       "role": "User",
       "department": "Operations",
       "avatar": "",
@@ -264,5 +264,5 @@
       "__v": 0
     }
   ],
-  "savedAt": "2026-09-02T10:17:55.719Z"
+  "savedAt": "2026-09-02T10:39:29.551Z"
 }
