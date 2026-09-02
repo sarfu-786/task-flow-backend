@@ -10,7 +10,7 @@ const { fallbackStore } = require('../config/db');
 // @access  Private
 router.get('/', protect, async (req, res) => {
   try {
-    const { search, role, department } = req.query;
+    const { search, role, department, status } = req.query;
 
     if (fallbackStore.isFallback) {
       let usersList = fallbackStore.users.map((u) => ({
@@ -21,8 +21,16 @@ router.get('/', protect, async (req, res) => {
         role: u.role,
         department: u.department,
         avatar: u.avatar,
+        status: u.status || 'Approved',
         createdAt: u.createdAt,
       }));
+
+      // Filter by status: If not specified, exclude Rejected and Pending users from active employee lists
+      if (status && status !== 'all') {
+        usersList = usersList.filter((u) => u.status === status);
+      } else if (!status) {
+        usersList = usersList.filter((u) => u.status !== 'Rejected' && u.status !== 'Pending');
+      }
 
       if (search && search.trim() !== '') {
         const q = search.trim().toLowerCase();
@@ -53,6 +61,13 @@ router.get('/', protect, async (req, res) => {
       });
     } else {
       const queryObj = {};
+
+      if (status && status !== 'all') {
+        queryObj.status = status;
+      } else if (!status) {
+        // Exclude Rejected and Pending users from active employee list
+        queryObj.status = { $nin: ['Rejected', 'Pending'] };
+      }
 
       if (search && search.trim() !== '') {
         const regex = new RegExp(search.trim(), 'i');
@@ -175,6 +190,25 @@ router.post('/', protect, async (req, res) => {
         avatar: req.body.avatar || '',
       });
 
+      // Mirror to fallbackStore backup
+      try {
+        const localCopy = {
+          _id: user._id.toString(),
+          name: user.name,
+          email: user.email,
+          username: user.username,
+          password: user.password,
+          role: user.role,
+          department: user.department,
+          avatar: user.avatar || '',
+          createdAt: user.createdAt,
+        };
+        fallbackStore.users.unshift(localCopy);
+        fallbackStore.saveToFile();
+      } catch (err) {
+        console.warn('Local backup write notice:', err.message);
+      }
+
       const returnedUser = user.toObject();
       delete returnedUser.password;
 
@@ -255,6 +289,25 @@ router.put('/:id', protect, async (req, res) => {
 
       await user.save();
 
+      // Mirror to local store
+      try {
+        const localIdx = fallbackStore.users.findIndex(u => u._id.toString() === id.toString());
+        if (localIdx >= 0) {
+          fallbackStore.users[localIdx] = {
+            ...fallbackStore.users[localIdx],
+            name: user.name,
+            email: user.email,
+            username: user.username,
+            role: user.role,
+            department: user.department,
+            avatar: user.avatar,
+          };
+          fallbackStore.saveToFile();
+        }
+      } catch (err) {
+        console.warn('Local backup update notice:', err.message);
+      }
+
       const returnedUser = user.toObject();
       delete returnedUser.password;
 
@@ -303,6 +356,16 @@ router.delete('/:id', protect, async (req, res) => {
         return res.status(404).json({ success: false, message: 'User not found' });
       }
 
+      try {
+        const localIdx = fallbackStore.users.findIndex(u => u._id.toString() === id.toString());
+        if (localIdx >= 0) {
+          fallbackStore.users.splice(localIdx, 1);
+          fallbackStore.saveToFile();
+        }
+      } catch (err) {
+        console.warn('Local backup delete notice:', err.message);
+      }
+
       return res.json({
         success: true,
         message: 'User removed successfully',
@@ -314,6 +377,161 @@ router.delete('/:id', protect, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to remove user',
+      error: error.message,
+    });
+  }
+});
+
+// @route   GET /api/users/approvals
+// @desc    Get all user registrations with approval status
+// @access  Private (Manager only)
+router.get('/approvals', protect, async (req, res) => {
+  try {
+    const { status, search } = req.query;
+
+    let usersList = [];
+    if (fallbackStore.isFallback) {
+      usersList = fallbackStore.users.map((u) => ({
+        _id: u._id,
+        name: u.name,
+        email: u.email,
+        username: u.username,
+        role: u.role,
+        department: u.department,
+        avatar: u.avatar,
+        status: u.status || 'Approved',
+        createdAt: u.createdAt,
+      }));
+    } else {
+      const rawUsers = await User.find({}).select('-password').sort({ createdAt: -1 });
+      usersList = rawUsers.map((u) => ({
+        _id: u._id,
+        name: u.name,
+        email: u.email,
+        username: u.username,
+        role: u.role,
+        department: u.department,
+        avatar: u.avatar,
+        status: u.status || 'Approved',
+        createdAt: u.createdAt,
+      }));
+    }
+
+    // Compute counts
+    const pendingCount = usersList.filter((u) => u.status === 'Pending').length;
+    const approvedCount = usersList.filter((u) => u.status === 'Approved').length;
+    const rejectedCount = usersList.filter((u) => u.status === 'Rejected').length;
+    const totalCount = usersList.length;
+
+    // Apply status filter
+    if (status && status !== 'all') {
+      usersList = usersList.filter((u) => u.status === status);
+    }
+
+    // Apply search filter
+    if (search && search.trim() !== '') {
+      const q = search.trim().toLowerCase();
+      usersList = usersList.filter(
+        (u) =>
+          u.name.toLowerCase().includes(q) ||
+          u.email.toLowerCase().includes(q) ||
+          u.username.toLowerCase().includes(q) ||
+          (u.department && u.department.toLowerCase().includes(q))
+      );
+    }
+
+    return res.json({
+      success: true,
+      counts: {
+        total: totalCount,
+        pending: pendingCount,
+        approved: approvedCount,
+        rejected: rejectedCount,
+      },
+      users: usersList,
+    });
+  } catch (error) {
+    console.error('Fetch approvals error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch user approvals',
+      error: error.message,
+    });
+  }
+});
+
+// @route   PUT /api/users/:id/approval
+// @desc    Approve or reject a user registration
+// @access  Private (Manager only)
+router.put('/:id/approval', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, department, role } = req.body;
+
+    if (!status || !['Approved', 'Rejected', 'Pending'].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid status (Approved, Rejected, or Pending) is required',
+      });
+    }
+
+    if (fallbackStore.isFallback) {
+      const uIndex = fallbackStore.users.findIndex((u) => u._id.toString() === id.toString());
+      if (uIndex === -1) {
+        return res.status(404).json({ success: false, message: 'User not found' });
+      }
+
+      fallbackStore.users[uIndex].status = status;
+      if (department) fallbackStore.users[uIndex].department = department;
+      if (role) fallbackStore.users[uIndex].role = role;
+      fallbackStore.saveToFile();
+
+      const returnedUser = { ...fallbackStore.users[uIndex] };
+      delete returnedUser.password;
+
+      return res.json({
+        success: true,
+        message: `User registration has been ${status.toLowerCase()} successfully!`,
+        user: returnedUser,
+      });
+    } else {
+      const user = await User.findById(id);
+      if (!user) {
+        return res.status(404).json({ success: false, message: 'User not found' });
+      }
+
+      user.status = status;
+      if (department) user.department = department;
+      if (role) user.role = role;
+      await user.save();
+
+      // Mirror to fallbackStore
+      try {
+        const localIdx = fallbackStore.users.findIndex((u) => u._id.toString() === id.toString());
+        if (localIdx >= 0) {
+          fallbackStore.users[localIdx].status = status;
+          if (department) fallbackStore.users[localIdx].department = department;
+          if (role) fallbackStore.users[localIdx].role = role;
+          fallbackStore.saveToFile();
+        }
+      } catch (err) {
+        console.warn('Backup write notice:', err.message);
+      }
+
+      const returnedUser = user.toObject();
+      delete returnedUser.password;
+
+      return res.json({
+        success: true,
+        message: `User registration has been ${status.toLowerCase()} successfully!`,
+        user: returnedUser,
+      });
+    }
+  } catch (error) {
+    console.error('Update approval error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update user approval status',
       error: error.message,
     });
   }

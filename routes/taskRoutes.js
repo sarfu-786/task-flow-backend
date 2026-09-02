@@ -385,6 +385,14 @@ router.post('/', protect, async (req, res) => {
     } else {
       const task = await Task.create(newTaskData);
 
+      // Mirror to fallbackStore backup
+      try {
+        fallbackStore.tasks.unshift(task.toObject());
+        fallbackStore.saveToFile();
+      } catch (err) {
+        console.warn('Local task backup notice:', err.message);
+      }
+
       // Dispatch task assignment notification to assigned user
       await createUserAssignmentNotification(task, targetAssignedTo, targetUserId, req.user);
 
@@ -551,6 +559,17 @@ router.put('/:id', protect, async (req, res) => {
 
       await task.save();
 
+      // Mirror to fallbackStore backup
+      try {
+        const localIdx = fallbackStore.tasks.findIndex(t => t._id.toString() === id.toString());
+        if (localIdx >= 0) {
+          fallbackStore.tasks[localIdx] = task.toObject();
+          fallbackStore.saveToFile();
+        }
+      } catch (err) {
+        console.warn('Local task backup update notice:', err.message);
+      }
+
       // Trigger manager notification if newly completed
       if (isNowCompleted && !wasCompleted) {
         await createManagerNotification(task, req.user, completionRemark || task.remark);
@@ -655,6 +674,17 @@ router.patch('/:id/status', protect, async (req, res) => {
 
       await task.save();
 
+      // Mirror to fallbackStore
+      try {
+        const localIdx = fallbackStore.tasks.findIndex(t => t._id.toString() === id.toString());
+        if (localIdx >= 0) {
+          fallbackStore.tasks[localIdx] = task.toObject();
+          fallbackStore.saveToFile();
+        }
+      } catch (err) {
+        console.warn('Local task backup update notice:', err.message);
+      }
+
       if (status === 'Completed' && !wasCompleted) {
         await createManagerNotification(task, req.user, finalRemark);
       }
@@ -701,6 +731,16 @@ router.delete('/:id', protect, async (req, res) => {
 
       if (!task) {
         return res.status(404).json({ success: false, message: 'Task not found' });
+      }
+
+      try {
+        const localIdx = fallbackStore.tasks.findIndex(t => t._id.toString() === id.toString());
+        if (localIdx >= 0) {
+          fallbackStore.tasks.splice(localIdx, 1);
+          fallbackStore.saveToFile();
+        }
+      } catch (err) {
+        console.warn('Local task backup delete notice:', err.message);
       }
 
       return res.json({

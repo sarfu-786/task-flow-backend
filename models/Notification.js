@@ -39,7 +39,15 @@ const notificationSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['task_completed', 'task_in_progress', 'task_assigned', 'remark_added'],
+    enum: [
+      'task_completed',
+      'task_in_progress',
+      'task_assigned',
+      'remark_added',
+      'user_registered',
+      'user_approved',
+      'user_rejected',
+    ],
     default: 'task_completed',
   },
   title: {

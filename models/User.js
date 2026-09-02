@@ -35,11 +35,16 @@ const userSchema = new mongoose.Schema({
   },
   department: {
     type: String,
-    default: 'Engineering',
+    default: 'Internet Work',
   },
   avatar: {
     type: String,
     default: '',
+  },
+  status: {
+    type: String,
+    enum: ['Approved', 'Pending', 'Rejected'],
+    default: 'Approved',
   },
   createdAt: {
     type: Date,

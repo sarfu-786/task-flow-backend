@@ -301,14 +301,14 @@ const initialNotifications = [
   }
 ];
 
-const seedDatabase = async (isFallback, User, Task, fallbackStore) => {
+const seedDatabase = async (isFallback, User, Task, fallbackStore, Notification) => {
   try {
     const managerEmail = 'sarfrajahamad068@gmail.com';
     const managerPassword = '998466';
 
     if (isFallback) {
-      const isLoaded = fallbackStore.loadFromFile();
-      if (!isLoaded || !fallbackStore.users || fallbackStore.users.length === 0) {
+      fallbackStore.loadFromFile();
+      if (!fallbackStore.users || fallbackStore.users.length === 0) {
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(managerPassword, salt);
         fallbackStore.users = [
@@ -328,7 +328,7 @@ const seedDatabase = async (isFallback, User, Task, fallbackStore) => {
         fallbackStore.notifications = fallbackStore.notifications || [];
         fallbackStore.saveToFile();
       } else {
-        // Ensure default manager exists and has updated credentials
+        // Ensure default manager exists and has updated credentials without removing other users
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(managerPassword, salt);
         const managerIndex = fallbackStore.users.findIndex(
@@ -357,7 +357,7 @@ const seedDatabase = async (isFallback, User, Task, fallbackStore) => {
         }
         fallbackStore.saveToFile();
       }
-      console.log(`[Storage] Default manager (${managerEmail}) verified in persistent store.`);
+      console.log(`[Storage] Default manager (${managerEmail}) and ${fallbackStore.users.length} user(s) verified in persistent store.`);
     } else {
       // MongoDB initialization
       if (User) {
@@ -383,11 +383,25 @@ const seedDatabase = async (isFallback, User, Task, fallbackStore) => {
             });
           }
         } else {
-          manager.password = managerPassword;
-          manager.role = 'Manager';
-          await manager.save();
+          let updated = false;
+          if (manager.role !== 'Manager') {
+            manager.role = 'Manager';
+            updated = true;
+          }
+          if (manager.status !== 'Approved') {
+            manager.status = 'Approved';
+            updated = true;
+          }
+          if (updated) {
+            await manager.save();
+          }
         }
         console.log(`[Database] Default manager (${managerEmail}) verified in MongoDB.`);
+
+        // Synchronize all existing users, tasks, and notifications between disk store and MongoDB
+        if (fallbackStore && typeof fallbackStore.syncWithMongoDB === 'function') {
+          await fallbackStore.syncWithMongoDB(User, Task, Notification);
+        }
       }
     }
   } catch (error) {

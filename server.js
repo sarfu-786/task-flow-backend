@@ -4,6 +4,7 @@ const dotenv = require('dotenv');
 const { connectDB, fallbackStore } = require('./config/db');
 const User = require('./models/User');
 const Task = require('./models/Task');
+const Notification = require('./models/Notification');
 const { seedDatabase } = require('./seedData');
 
 // Load environment variables
@@ -63,7 +64,7 @@ app.use((err, req, res, next) => {
 const startServer = async () => {
   try {
     const dbStatus = await connectDB();
-    await seedDatabase(dbStatus.isFallback, User, Task, fallbackStore);
+    await seedDatabase(dbStatus.isFallback, User, Task, fallbackStore, Notification);
 
     app.listen(PORT, () => {
       console.log(`=========================================`);
