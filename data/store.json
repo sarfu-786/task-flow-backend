@@ -5,7 +5,7 @@
       "name": "Sarfaraj Ahmad",
       "email": "sarfrajahamad068@gmail.com",
       "username": "sarfraj",
-      "password": "$2a$10$C7dbI6XN9Qv9fDzi24dGNey3/gD1JfJ77Z1NbzqRFOfaFKdE9FpGS",
+      "password": "$2a$10$FzO2efE8755K7Xt6WljIley/P4FiMZ608cBvyh9Ytbb3toDlYsqGO",
       "role": "Manager",
       "department": "Management",
       "avatar": "",
@@ -17,7 +17,7 @@
       "name": "Asif",
       "email": "asif@gmail.com",
       "username": "asif",
-      "password": "$2a$10$bfiB1Az8KBvdjPj8Y3wQz.UwZO8AveDfe3Y/EPJjh8AQ5mqjbSFwG",
+      "password": "$2a$10$mHQvKZiV8sjeqoX2Ud.1v.uzNjzZn3U8hhVCETVvsqwVcpG1HtQAG",
       "role": "User",
       "department": "Operations",
       "avatar": "",
@@ -29,7 +29,7 @@
       "name": "Shoaib Khan",
       "email": "shoaib@gmail.com",
       "username": "shoaib",
-      "password": "$2a$10$L.chwX867DKW4UHNVtFFc.3eO1D7eDLQbZkgf4aV4wZL72G6RJ.62",
+      "password": "$2a$10$c2E2hLfDLhmkdbHEMe5.l.BH4IC5LwuybL13z0/WInxAe3lHuTc3K",
       "role": "User",
       "department": "Operations",
       "avatar": "",
@@ -41,7 +41,7 @@
       "name": "Arif",
       "email": "arif@gmail.com",
       "username": "arif",
-      "password": "$2a$10$iPdlNaB5DYcgzN228ilnP.RzvgYFaSH1b0wb0GPBpuvTt.rgUzcuS",
+      "password": "$2a$10$rU2d9W6hLP26m6vLXcXvTe9FQRMJjVZ8CVvy1X96lIK6LPfPrOOyK",
       "role": "User",
       "department": "Social Media",
       "avatar": "",
@@ -53,7 +53,7 @@
       "name": "Saifi Khan",
       "email": "saifi@gmail.com",
       "username": "saifi",
-      "password": "$2a$10$tf/QxImKHSs.Bu8rRQUDaOVZ3MXekbVV3IlY1JyiVBbi7x99sHp7e",
+      "password": "$2a$10$oMhz9OFWd6qtFztNO2u/cehwDDVEWCm4JMJGy/YF4ddxLH3X.GATS",
       "role": "User",
       "department": "Backend",
       "avatar": "",
@@ -65,11 +65,11 @@
       "name": "Wasil",
       "email": "wasil@gmail.com",
       "username": "wasil",
-      "password": "$2a$10$O0HoIfooCbqu3hliUozmjOh5LME7ZMXySzlMU9TPXV6AFTMA3xGnW",
+      "password": "$2a$10$HQtdHtRNmJitel1djX7KcORi6iwlroEhOpdBMLCL6as8u0YKoldw2",
       "role": "User",
       "department": "Documentation",
       "avatar": "",
-      "status": "Rejected",
+      "status": "Approved",
       "createdAt": "2026-09-02T07:37:12.598Z"
     },
     {
@@ -77,60 +77,12 @@
       "name": "Abdullah",
       "email": "abdu@gmail.com",
       "username": "abdu",
-      "password": "$2a$10$IKveOtpwWXGeVCjPng/LAempyovsBQm1yyOiHHXkTY/N11UUzc6xq",
+      "password": "$2a$10$qc6s46rYMNxjZmUIBFvM5.pJzZToiK9kLbtPrd9qjezARh3v2p2g2",
       "role": "User",
       "department": "Backend",
       "avatar": "",
       "status": "Approved",
       "createdAt": "2026-09-02T09:24:38.407Z"
-    },
-    {
-      "_id": "6a97efa6f2713eac1ebab815",
-      "name": "Atlas Test User",
-      "email": "atlas_verify_1788340851704@gmail.com",
-      "username": "atlas_verify_1788340851704",
-      "password": "$2a$10$/MalyMT5B./M4GO51aMrLefGGvw/dPF2RB.IftktOQdnnKz09Rrgy",
-      "role": "User",
-      "department": "Backend",
-      "avatar": "",
-      "status": "Approved",
-      "createdAt": "2026-09-02T09:20:51.821Z"
-    },
-    {
-      "_id": "6a9932e58abcede833c59e73",
-      "name": "Test Manager",
-      "email": "test_mgr_1788424933722@test.com",
-      "username": "testmgr933722",
-      "password": "$2a$10$TMbAdBdHz2.Yl9LwEBl1yOHUpvM22xvjBOAi7zmt9a9CWsviimw5i",
-      "role": "User",
-      "department": "Management",
-      "avatar": "",
-      "status": "Pending",
-      "createdAt": "2026-09-03T08:42:13.771Z"
-    },
-    {
-      "_id": "6a9933128abcede833c59e7d",
-      "name": "Asif Worker",
-      "email": "worker_1788424978517@test.com",
-      "username": "worker978517",
-      "password": "$2a$10$7UU5F.FubZ34KZMQjEllUO7xHWxU32TwXmpBEIXLHD0TK32YIDdMq",
-      "role": "User",
-      "department": "Operations",
-      "avatar": "",
-      "status": "Pending",
-      "createdAt": "2026-09-03T08:42:58.548Z"
-    },
-    {
-      "_id": "6a9933268abcede833c59e88",
-      "name": "Asif Worker",
-      "email": "worker_1788424997975@test.com",
-      "username": "worker997975",
-      "password": "$2a$10$Iyq5AT2P8eF/zzAl4Ma0j.B8oweJmHG.Le2pFOatkpSK8bhQmpvBm",
-      "role": "User",
-      "department": "Operations",
-      "avatar": "",
-      "status": "Approved",
-      "createdAt": "2026-09-03T08:43:18.012Z"
     }
   ],
   "tasks": [
@@ -165,23 +117,6 @@
       "completionRemark": "",
       "createdAt": "2026-09-02T09:23:43.249Z",
       "updatedAt": "2026-09-02T09:23:43.251Z",
-      "__v": 0
-    },
-    {
-      "_id": "6a97efa6f2713eac1ebab819",
-      "taskType": "backend work",
-      "description": "Database verification test task 1788340852348",
-      "expectedDate": "2026-09-02T09:20:52.348Z",
-      "remark": "Testing MongoDB Atlas persistence",
-      "status": "To Do",
-      "priority": "Medium",
-      "user": "6a97efa6f2713eac1ebab815",
-      "assignedTo": "Atlas Test User",
-      "assignedBy": "Sarfaraj Ahmad (Manager)",
-      "completionRemark": "",
-      "completedAt": null,
-      "createdAt": "2026-09-02T09:20:52.586Z",
-      "updatedAt": "2026-09-02T09:43:02.236Z",
       "__v": 0
     },
     {
@@ -240,5 +175,5 @@
       "__v": 0
     }
   ],
-  "savedAt": "2026-09-03T09:12:17.737Z"
+  "savedAt": "2026-09-03T09:24:35.663Z"
 }
