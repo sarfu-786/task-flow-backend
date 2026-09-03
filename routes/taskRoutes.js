@@ -10,7 +10,7 @@ const VALID_TASK_TYPES = ['internet work', 'documentation', 'social media', 'bac
 const VALID_STATUSES = ['To Do', 'In Progress', 'Completed'];
 
 // Helper to create Manager Notification when a task is completed or remarked
-const createManagerNotification = async (task, user, completionRemark = '') => {
+const createManagerNotification = async (task, user, completionRemark = '', io = null) => {
   try {
     const userName = user?.name || task.assignedTo || 'Team Member';
     const userAvatar = user?.avatar || '';
@@ -34,15 +34,34 @@ const createManagerNotification = async (task, user, completionRemark = '') => {
       createdAt: new Date(),
     };
 
+    let createdNotif = null;
+
     if (fallbackStore.isFallback) {
       if (!fallbackStore.notifications) {
         fallbackStore.notifications = [];
       }
       const notifId = '64e8c3' + Math.random().toString(16).substring(2, 10) + '00000000'.substring(0, 10);
-      fallbackStore.notifications.unshift({ _id: notifId, ...notifData });
+      createdNotif = { _id: notifId, ...notifData };
+      fallbackStore.notifications.unshift(createdNotif);
       fallbackStore.saveToFile();
     } else {
-      await Notification.create(notifData);
+      createdNotif = await Notification.create(notifData);
+    }
+
+    // Instant Real-Time Socket.io dispatch to Managers
+    if (io) {
+      const payload = {
+        notification: createdNotif,
+        task: task,
+        type: 'task_completed',
+        title: `Task Completed: ${userName}`,
+        message: `${userName} completed "${shortDesc}"`,
+        remark: remarkText,
+      };
+      io.to('role:Manager').emit('notification:new', payload);
+      io.to('role:Manager').emit('task:completed', { task, notification: createdNotif });
+      io.emit('tasks:updated', { task, action: 'completed' });
+      io.emit('stats:updated');
     }
   } catch (err) {
     console.error('[Manager Notification Helper Error]', err.message);
@@ -50,7 +69,7 @@ const createManagerNotification = async (task, user, completionRemark = '') => {
 };
 
 // Helper to create User Notification when manager assigns a task
-const createUserAssignmentNotification = async (task, targetAssignedTo, targetUserId, managerUser) => {
+const createUserAssignmentNotification = async (task, targetAssignedTo, targetUserId, managerUser, io = null) => {
   try {
     const assignedBy = managerUser ? `${managerUser.name} (${managerUser.role || 'Manager'})` : 'Manager';
     const taskDesc = task.description || 'Assigned Task';
@@ -76,15 +95,43 @@ const createUserAssignmentNotification = async (task, targetAssignedTo, targetUs
       createdAt: new Date(),
     };
 
+    let createdNotif = null;
+
     if (fallbackStore.isFallback) {
       if (!fallbackStore.notifications) {
         fallbackStore.notifications = [];
       }
       const notifId = '64e8c3' + Math.random().toString(16).substring(2, 10) + '00000000'.substring(0, 10);
-      fallbackStore.notifications.unshift({ _id: notifId, ...notifData });
+      createdNotif = { _id: notifId, ...notifData };
+      fallbackStore.notifications.unshift(createdNotif);
       fallbackStore.saveToFile();
     } else {
-      await Notification.create(notifData);
+      createdNotif = await Notification.create(notifData);
+    }
+
+    // Instant Real-Time Socket.io dispatch to Target User & Managers
+    if (io) {
+      const payload = {
+        notification: createdNotif,
+        task: task,
+        type: 'task_assigned',
+        title: `New Task Assigned by ${assignedBy}`,
+        message: `${assignedBy} assigned you: "${shortDesc}"`,
+        remark: instructions,
+      };
+
+      if (targetUserId) {
+        io.to(`user:${targetUserId.toString()}`).emit('notification:new', payload);
+        io.to(`user:${targetUserId.toString()}`).emit('task:assigned', { task, notification: createdNotif });
+      }
+      if (targetAssignedTo) {
+        const cleanName = targetAssignedTo.toString().toLowerCase().trim();
+        io.to(`user:${cleanName}`).emit('notification:new', payload);
+        io.to(`user:${cleanName}`).emit('task:assigned', { task, notification: createdNotif });
+      }
+      io.to('role:Manager').emit('notification:new', payload);
+      io.emit('tasks:updated', { task, action: 'created' });
+      io.emit('stats:updated');
     }
   } catch (err) {
     console.error('[User Assignment Notification Helper Error]', err.message);
@@ -368,14 +415,16 @@ router.post('/', protect, async (req, res) => {
       updatedAt: new Date(),
     };
 
+    const io = req.app.get('io');
+
     if (fallbackStore.isFallback) {
       const generatedId = '64e8b2' + Math.random().toString(16).substring(2, 10) + '00000000'.substring(0, 10);
       const createdTask = { _id: generatedId, ...newTaskData };
       fallbackStore.tasks.unshift(createdTask);
       fallbackStore.saveToFile();
 
-      // Dispatch task assignment notification to assigned user
-      await createUserAssignmentNotification(createdTask, targetAssignedTo, targetUserId, req.user);
+      // Dispatch task assignment notification to assigned user & socket
+      await createUserAssignmentNotification(createdTask, targetAssignedTo, targetUserId, req.user, io);
 
       return res.status(201).json({
         success: true,
@@ -393,8 +442,8 @@ router.post('/', protect, async (req, res) => {
         console.warn('Local task backup notice:', err.message);
       }
 
-      // Dispatch task assignment notification to assigned user
-      await createUserAssignmentNotification(task, targetAssignedTo, targetUserId, req.user);
+      // Dispatch task assignment notification to assigned user & socket
+      await createUserAssignmentNotification(task, targetAssignedTo, targetUserId, req.user, io);
 
       return res.status(201).json({
         success: true,
@@ -418,6 +467,7 @@ router.post('/', protect, async (req, res) => {
 router.put('/:id', protect, async (req, res) => {
   try {
     const { id } = req.params;
+    const io = req.app.get('io');
     const {
       taskType,
       description,
@@ -515,12 +565,17 @@ router.put('/:id', protect, async (req, res) => {
 
       // Trigger manager notification if newly completed
       if (isNowCompleted && !wasCompleted) {
-        await createManagerNotification(updated, req.user, completionRemark || updated.remark);
+        await createManagerNotification(updated, req.user, completionRemark || updated.remark, io);
       }
 
       // If reassigned, notify the new assigned user
       if (assignedTo && assignedTo.trim() !== previousAssignee) {
-        await createUserAssignmentNotification(updated, updated.assignedTo, targetUserId, req.user);
+        await createUserAssignmentNotification(updated, updated.assignedTo, targetUserId, req.user, io);
+      }
+
+      if (io) {
+        io.emit('tasks:updated', { task: updated, action: 'update' });
+        io.emit('stats:updated');
       }
 
       return res.json({
@@ -572,12 +627,17 @@ router.put('/:id', protect, async (req, res) => {
 
       // Trigger manager notification if newly completed
       if (isNowCompleted && !wasCompleted) {
-        await createManagerNotification(task, req.user, completionRemark || task.remark);
+        await createManagerNotification(task, req.user, completionRemark || task.remark, io);
       }
 
       // If reassigned, notify the new assigned user
       if (assignedTo && assignedTo.trim() !== previousAssignee) {
-        await createUserAssignmentNotification(task, task.assignedTo, targetUserId, req.user);
+        await createUserAssignmentNotification(task, task.assignedTo, targetUserId, req.user, io);
+      }
+
+      if (io) {
+        io.emit('tasks:updated', { task, action: 'update' });
+        io.emit('stats:updated');
       }
 
       return res.json({
@@ -602,6 +662,7 @@ router.put('/:id', protect, async (req, res) => {
 router.patch('/:id/status', protect, async (req, res) => {
   try {
     const { id } = req.params;
+    const io = req.app.get('io');
     const { status, completionRemark, remark } = req.body;
 
     if (!status || !VALID_STATUSES.includes(status)) {
@@ -635,7 +696,10 @@ router.patch('/:id/status', protect, async (req, res) => {
       fallbackStore.saveToFile();
 
       if (status === 'Completed' && !wasCompleted) {
-        await createManagerNotification(existing, req.user, finalRemark);
+        await createManagerNotification(existing, req.user, finalRemark, io);
+      } else if (io) {
+        io.emit('tasks:updated', { task: existing, action: 'status' });
+        io.emit('stats:updated');
       }
 
       return res.json({
@@ -686,7 +750,10 @@ router.patch('/:id/status', protect, async (req, res) => {
       }
 
       if (status === 'Completed' && !wasCompleted) {
-        await createManagerNotification(task, req.user, finalRemark);
+        await createManagerNotification(task, req.user, finalRemark, io);
+      } else if (io) {
+        io.emit('tasks:updated', { task, action: 'status' });
+        io.emit('stats:updated');
       }
 
       return res.json({
@@ -711,6 +778,7 @@ router.patch('/:id/status', protect, async (req, res) => {
 router.delete('/:id', protect, async (req, res) => {
   try {
     const { id } = req.params;
+    const io = req.app.get('io');
 
     if (fallbackStore.isFallback) {
       const taskIndex = fallbackStore.tasks.findIndex((t) => t._id.toString() === id.toString());
@@ -720,6 +788,12 @@ router.delete('/:id', protect, async (req, res) => {
 
       const deleted = fallbackStore.tasks.splice(taskIndex, 1)[0];
       fallbackStore.saveToFile();
+
+      if (io) {
+        io.emit('task:deleted', { id });
+        io.emit('tasks:updated', { id, action: 'delete' });
+        io.emit('stats:updated');
+      }
 
       return res.json({
         success: true,
@@ -741,6 +815,12 @@ router.delete('/:id', protect, async (req, res) => {
         }
       } catch (err) {
         console.warn('Local task backup delete notice:', err.message);
+      }
+
+      if (io) {
+        io.emit('task:deleted', { id });
+        io.emit('tasks:updated', { id, action: 'delete' });
+        io.emit('stats:updated');
       }
 
       return res.json({

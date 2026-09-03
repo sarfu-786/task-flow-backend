@@ -8,9 +8,23 @@ const { fallbackStore } = require('../config/db');
 
 const Notification = require('../models/Notification');
 
-// Generate JWT
-const generateToken = (id) => {
-  return jwt.sign({ id }, JWT_SECRET, {
+// Generate JWT with comprehensive user claims for resilient session verification
+const generateToken = (userOrId) => {
+  if (typeof userOrId === 'object' && userOrId !== null) {
+    const userId = userOrId._id ? userOrId._id.toString() : (userOrId.id ? userOrId.id.toString() : '');
+    return jwt.sign(
+      {
+        id: userId,
+        email: (userOrId.email || '').toLowerCase().trim(),
+        username: (userOrId.username || '').toLowerCase().trim(),
+        role: userOrId.role || 'User',
+        name: userOrId.name || '',
+      },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+  }
+  return jwt.sign({ id: userOrId ? userOrId.toString() : '' }, JWT_SECRET, {
     expiresIn: '30d',
   });
 };
@@ -242,17 +256,18 @@ router.post('/register', async (req, res) => {
 // @access  Public
 router.post('/login', async (req, res) => {
   try {
-    const { usernameOrEmail, password } = req.body;
+    const inputIdentifier = req.body.usernameOrEmail || req.body.email || req.body.username;
+    const { password } = req.body;
 
     // Validation
-    if (!usernameOrEmail || !password) {
+    if (!inputIdentifier || !password) {
       return res.status(400).json({
         success: false,
         message: 'Please provide both username/email and password',
       });
     }
 
-    const identifier = usernameOrEmail.trim().toLowerCase();
+    const identifier = inputIdentifier.trim().toLowerCase();
 
     if (fallbackStore.isFallback) {
       const user = fallbackStore.users.find(
@@ -292,13 +307,13 @@ router.post('/login', async (req, res) => {
         });
       }
 
-      const token = generateToken(user._id);
+      const token = generateToken(user);
 
       return res.json({
         success: true,
         token,
         user: {
-          id: user._id,
+          id: user._id ? user._id.toString() : user.id,
           name: user.name,
           email: user.email,
           username: user.username,
@@ -348,13 +363,13 @@ router.post('/login', async (req, res) => {
         });
       }
 
-      const token = generateToken(user._id);
+      const token = generateToken(user);
 
       return res.json({
         success: true,
         token,
         user: {
-          id: user._id,
+          id: user._id ? user._id.toString() : user.id,
           name: user.name,
           email: user.email,
           username: user.username,

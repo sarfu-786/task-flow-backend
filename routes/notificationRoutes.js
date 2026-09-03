@@ -86,6 +86,7 @@ router.get('/', protect, async (req, res) => {
 router.patch('/:id/read', protect, async (req, res) => {
   try {
     const { id } = req.params;
+    const io = req.app.get('io');
 
     if (fallbackStore.isFallback) {
       const idx = fallbackStore.notifications.findIndex(
@@ -97,6 +98,10 @@ router.patch('/:id/read', protect, async (req, res) => {
 
       fallbackStore.notifications[idx].isRead = true;
       fallbackStore.saveToFile();
+
+      if (io) {
+        io.emit('notification:updated', { id, isRead: true });
+      }
 
       return res.json({
         success: true,
@@ -112,6 +117,10 @@ router.patch('/:id/read', protect, async (req, res) => {
 
       if (!notification) {
         return res.status(404).json({ success: false, message: 'Notification not found' });
+      }
+
+      if (io) {
+        io.emit('notification:updated', { id, isRead: true });
       }
 
       return res.json({
@@ -137,6 +146,7 @@ router.patch('/mark-all-read', protect, async (req, res) => {
   try {
     const isManager = req.user && ['Manager', 'Executive', 'Administrator'].includes(req.user.role);
     const userName = (req.user?.name || '').toLowerCase().trim();
+    const io = req.app.get('io');
 
     if (fallbackStore.isFallback) {
       if (fallbackStore.notifications) {
@@ -148,6 +158,10 @@ router.patch('/mark-all-read', protect, async (req, res) => {
           }
         });
         fallbackStore.saveToFile();
+      }
+
+      if (io) {
+        io.emit('notification:updated', { allRead: true });
       }
 
       return res.json({
@@ -171,6 +185,10 @@ router.patch('/mark-all-read', protect, async (req, res) => {
         );
       }
 
+      if (io) {
+        io.emit('notification:updated', { allRead: true });
+      }
+
       return res.json({
         success: true,
         message: 'All notifications marked as read',
@@ -192,6 +210,7 @@ router.patch('/mark-all-read', protect, async (req, res) => {
 router.delete('/:id', protect, async (req, res) => {
   try {
     const { id } = req.params;
+    const io = req.app.get('io');
 
     if (fallbackStore.isFallback) {
       const idx = fallbackStore.notifications.findIndex(
@@ -204,6 +223,10 @@ router.delete('/:id', protect, async (req, res) => {
       const deleted = fallbackStore.notifications.splice(idx, 1)[0];
       fallbackStore.saveToFile();
 
+      if (io) {
+        io.emit('notification:updated', { deletedId: id });
+      }
+
       return res.json({
         success: true,
         message: 'Notification deleted',
@@ -213,6 +236,10 @@ router.delete('/:id', protect, async (req, res) => {
       const notification = await Notification.findByIdAndDelete(id);
       if (!notification) {
         return res.status(404).json({ success: false, message: 'Notification not found' });
+      }
+
+      if (io) {
+        io.emit('notification:updated', { deletedId: id });
       }
 
       return res.json({
@@ -237,6 +264,7 @@ router.delete('/:id', protect, async (req, res) => {
 router.delete('/', protect, async (req, res) => {
   try {
     const isManager = req.user && ['Manager', 'Executive', 'Administrator'].includes(req.user.role);
+    const io = req.app.get('io');
 
     if (fallbackStore.isFallback) {
       if (isManager) {
@@ -265,6 +293,10 @@ router.delete('/', protect, async (req, res) => {
       }
       fallbackStore.saveToFile();
 
+      if (io) {
+        io.emit('notification:updated', { cleared: true });
+      }
+
       return res.json({
         success: true,
         message: 'Notifications cleared',
@@ -281,6 +313,10 @@ router.delete('/', protect, async (req, res) => {
             { forRole: 'User' },
           ],
         });
+      }
+
+      if (io) {
+        io.emit('notification:updated', { cleared: true });
       }
 
       return res.json({
