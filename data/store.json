@@ -99,6 +99,22 @@
   ],
   "tasks": [
     {
+      "taskType": "backend work",
+      "description": "store the data",
+      "expectedDate": "2026-09-10T00:00:00.000Z",
+      "remark": "database",
+      "status": "To Do",
+      "priority": "Medium",
+      "user": "6a97d1b557d1434b8e775326",
+      "assignedTo": "Saifi Khan",
+      "assignedBy": "Sarfaraj Ahmad (Manager)",
+      "completionRemark": "",
+      "createdAt": "2026-09-03T07:56:46.255Z",
+      "updatedAt": "2026-09-03T07:56:46.275Z",
+      "_id": "6a99283e5add096db649c773",
+      "__v": 0
+    },
+    {
       "_id": "6a97eb1f5b173569426c79c9",
       "taskType": "social media",
       "description": "handle the social media account",
@@ -264,5 +280,5 @@
       "__v": 0
     }
   ],
-  "savedAt": "2026-09-02T10:39:29.551Z"
+  "savedAt": "2026-09-03T07:56:46.340Z"
 }

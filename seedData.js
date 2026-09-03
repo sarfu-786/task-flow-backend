@@ -321,6 +321,7 @@ const seedDatabase = async (isFallback, User, Task, fallbackStore, Notification)
             role: 'Manager',
             department: 'Management',
             avatar: '',
+            status: 'Approved',
             createdAt: new Date(),
           }
         ];
@@ -328,21 +329,25 @@ const seedDatabase = async (isFallback, User, Task, fallbackStore, Notification)
         fallbackStore.notifications = fallbackStore.notifications || [];
         fallbackStore.saveToFile();
       } else {
-        // Ensure default manager exists and has updated credentials without removing other users
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(managerPassword, salt);
+        // Verify default manager exists without altering any existing user passwords
         const managerIndex = fallbackStore.users.findIndex(
-          (u) => u.email.toLowerCase() === managerEmail.toLowerCase() || u.role === 'Manager'
+          (u) => u.email && u.email.toLowerCase() === managerEmail.toLowerCase()
         );
 
         if (managerIndex !== -1) {
-          fallbackStore.users[managerIndex].name = 'Sarfaraj Ahmad';
-          fallbackStore.users[managerIndex].email = managerEmail;
-          fallbackStore.users[managerIndex].username = 'sarfraj';
-          fallbackStore.users[managerIndex].password = hashedPassword;
-          fallbackStore.users[managerIndex].role = 'Manager';
-          fallbackStore.users[managerIndex].department = 'Management';
+          // If default manager exists, preserve their password intact
+          const current = fallbackStore.users[managerIndex];
+          fallbackStore.users[managerIndex] = {
+            ...current,
+            role: 'Manager',
+            status: 'Approved',
+            // Keep existing password safe and unchanged
+            password: current.password || (await bcrypt.hash(managerPassword, await bcrypt.genSalt(10))),
+          };
         } else {
+          // Add default manager only if not already present in store
+          const salt = await bcrypt.genSalt(10);
+          const hashedPassword = await bcrypt.hash(managerPassword, salt);
           fallbackStore.users.unshift({
             _id: '64e8a10676ef8300000000',
             name: 'Sarfaraj Ahmad',
@@ -352,36 +357,27 @@ const seedDatabase = async (isFallback, User, Task, fallbackStore, Notification)
             role: 'Manager',
             department: 'Management',
             avatar: '',
+            status: 'Approved',
             createdAt: new Date(),
           });
         }
         fallbackStore.saveToFile();
       }
-      console.log(`[Storage] Default manager (${managerEmail}) and ${fallbackStore.users.length} user(s) verified in persistent store.`);
+      console.log(`[Storage] Verified ${fallbackStore.users.length} user(s) in persistent store with safe password preservation.`);
     } else {
-      // MongoDB initialization
+      // MongoDB initialization: Ensure default manager exists without overwriting existing passwords
       if (User) {
-        let manager = await User.findOne({ email: managerEmail });
+        let manager = await User.findOne({ email: managerEmail }).select('+password');
         if (!manager) {
-          manager = await User.findOne({ role: 'Manager' });
-          if (manager) {
-            manager.name = 'Sarfaraj Ahmad';
-            manager.email = managerEmail;
-            manager.username = 'sarfraj';
-            manager.password = managerPassword;
-            manager.role = 'Manager';
-            manager.department = 'Management';
-            await manager.save();
-          } else {
-            await User.create({
-              name: 'Sarfaraj Ahmad',
-              email: managerEmail,
-              username: 'sarfraj',
-              password: managerPassword,
-              role: 'Manager',
-              department: 'Management',
-            });
-          }
+          await User.create({
+            name: 'Sarfaraj Ahmad',
+            email: managerEmail,
+            username: 'sarfraj',
+            password: managerPassword,
+            role: 'Manager',
+            department: 'Management',
+            status: 'Approved',
+          });
         } else {
           let updated = false;
           if (manager.role !== 'Manager') {
@@ -396,7 +392,7 @@ const seedDatabase = async (isFallback, User, Task, fallbackStore, Notification)
             await manager.save();
           }
         }
-        console.log(`[Database] Default manager (${managerEmail}) verified in MongoDB.`);
+        console.log(`[Database] Verified users in MongoDB with safe password preservation.`);
 
         // Synchronize all existing users, tasks, and notifications between disk store and MongoDB
         if (fallbackStore && typeof fallbackStore.syncWithMongoDB === 'function') {

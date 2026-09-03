@@ -301,6 +301,7 @@ router.put('/:id', protect, async (req, res) => {
             role: user.role,
             department: user.department,
             avatar: user.avatar,
+            password: password && password.trim().length >= 4 ? user.password : fallbackStore.users[localIdx].password,
           };
           fallbackStore.saveToFile();
         }
