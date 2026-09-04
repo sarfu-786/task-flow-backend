@@ -234,27 +234,107 @@ router.post('/', protect, async (req, res) => {
 router.put('/:id', protect, async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, email, username, role, department, avatar, password } = req.body;
+    const { name, email, username, role, department, avatar, password, newPassword } = req.body;
+    const currentUserId = req.user._id ? req.user._id.toString() : (req.user.id ? req.user.id.toString() : '');
+    const isSelf = currentUserId === id.toString();
+    const isManagerOrAdmin = ['Manager', 'Executive', 'Administrator'].includes(req.user.role);
+
+    if (!isSelf && !isManagerOrAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: 'You are not authorized to edit another user’s profile.',
+      });
+    }
+
+    const targetPassword = (newPassword && newPassword.trim()) ? newPassword.trim() : ((password && password.trim()) ? password.trim() : null);
+
+    if (name !== undefined && !name.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Full name cannot be empty',
+      });
+    }
+
+    let cleanEmail = email !== undefined ? email.trim().toLowerCase() : undefined;
+    if (cleanEmail !== undefined) {
+      if (!cleanEmail) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email address cannot be empty',
+        });
+      }
+      const emailRegex = /\S+@\S+\.\S+/;
+      if (!emailRegex.test(cleanEmail)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please provide a valid email address',
+        });
+      }
+    }
+
+    let cleanUsername = username !== undefined ? username.trim().toLowerCase() : undefined;
+    if (cleanUsername !== undefined && !cleanUsername) {
+      return res.status(400).json({
+        success: false,
+        message: 'Username cannot be empty',
+      });
+    }
+
+    if (targetPassword !== null && targetPassword.length < 4) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 4 characters long',
+      });
+    }
 
     if (fallbackStore.isFallback) {
-      const userIndex = fallbackStore.users.findIndex((u) => u._id.toString() === id.toString());
+      const userIndex = fallbackStore.users.findIndex((u) => u._id && u._id.toString() === id.toString());
       if (userIndex === -1) {
         return res.status(404).json({ success: false, message: 'User not found' });
       }
 
+      // Check email uniqueness if email changed
+      if (cleanEmail && cleanEmail !== (fallbackStore.users[userIndex].email || '').toLowerCase()) {
+        const emailConflict = fallbackStore.users.find(
+          (u, idx) => idx !== userIndex && u.email && u.email.toLowerCase() === cleanEmail
+        );
+        if (emailConflict) {
+          return res.status(400).json({
+            success: false,
+            message: 'An account with this email address already exists. Please choose a different email.',
+          });
+        }
+      }
+
+      // Check username uniqueness if username changed
+      if (cleanUsername && cleanUsername !== (fallbackStore.users[userIndex].username || '').toLowerCase()) {
+        const usernameConflict = fallbackStore.users.find(
+          (u, idx) => idx !== userIndex && u.username && u.username.toLowerCase() === cleanUsername
+        );
+        if (usernameConflict) {
+          return res.status(400).json({
+            success: false,
+            message: 'This username is already taken. Please choose another username.',
+          });
+        }
+      }
+
       const existing = fallbackStore.users[userIndex];
       let newHashedPassword = existing.password;
-      if (password && password.trim().length >= 4) {
+      if (targetPassword) {
         const salt = await bcrypt.genSalt(10);
-        newHashedPassword = await bcrypt.hash(password.trim(), salt);
+        newHashedPassword = await bcrypt.hash(targetPassword, salt);
       }
+
+      // Only Managers/Admins can change user roles
+      const finalRole = isManagerOrAdmin && role ? role : existing.role;
 
       const updated = {
         ...existing,
         name: name !== undefined ? name.trim() : existing.name,
-        email: email !== undefined ? email.trim().toLowerCase() : existing.email,
-        username: username !== undefined ? username.trim().toLowerCase() : existing.username,
-        role: role || existing.role,
+        email: cleanEmail !== undefined ? cleanEmail : existing.email,
+        username: cleanUsername !== undefined ? cleanUsername : existing.username,
+        role: finalRole,
         department: department !== undefined ? department.trim() : existing.department,
         avatar: avatar !== undefined ? avatar : existing.avatar,
         password: newHashedPassword,
@@ -277,14 +357,42 @@ router.put('/:id', protect, async (req, res) => {
         return res.status(404).json({ success: false, message: 'User not found' });
       }
 
+      // Check email uniqueness
+      if (cleanEmail && cleanEmail !== (user.email || '').toLowerCase()) {
+        const emailConflict = await User.findOne({
+          _id: { $ne: user._id },
+          email: cleanEmail,
+        });
+        if (emailConflict) {
+          return res.status(400).json({
+            success: false,
+            message: 'An account with this email address already exists. Please choose a different email.',
+          });
+        }
+      }
+
+      // Check username uniqueness
+      if (cleanUsername && cleanUsername !== (user.username || '').toLowerCase()) {
+        const usernameConflict = await User.findOne({
+          _id: { $ne: user._id },
+          username: cleanUsername,
+        });
+        if (usernameConflict) {
+          return res.status(400).json({
+            success: false,
+            message: 'This username is already taken. Please choose another username.',
+          });
+        }
+      }
+
       if (name !== undefined) user.name = name.trim();
-      if (email !== undefined) user.email = email.trim().toLowerCase();
-      if (username !== undefined) user.username = username.trim().toLowerCase();
-      if (role) user.role = role;
+      if (cleanEmail !== undefined) user.email = cleanEmail;
+      if (cleanUsername !== undefined) user.username = cleanUsername;
+      if (isManagerOrAdmin && role) user.role = role;
       if (department !== undefined) user.department = department.trim();
       if (avatar !== undefined) user.avatar = avatar;
-      if (password && password.trim().length >= 4) {
-        user.password = password.trim();
+      if (targetPassword) {
+        user.password = targetPassword;
       }
 
       await user.save();
@@ -301,7 +409,7 @@ router.put('/:id', protect, async (req, res) => {
             role: user.role,
             department: user.department,
             avatar: user.avatar,
-            password: password && password.trim().length >= 4 ? user.password : fallbackStore.users[localIdx].password,
+            password: targetPassword ? user.password : fallbackStore.users[localIdx].password,
           };
           fallbackStore.saveToFile();
         }
@@ -490,6 +598,18 @@ router.put('/:id/approval', protect, async (req, res) => {
       const returnedUser = { ...fallbackStore.users[uIndex] };
       delete returnedUser.password;
 
+      // Broadcast socket update
+      try {
+        const io = req.app.get('io');
+        if (io) {
+          io.to('role:Manager').emit('approvals:updated');
+          io.emit('users:updated');
+          io.emit('notification:updated');
+        }
+      } catch (sockErr) {
+        console.warn('Socket broadcast notice:', sockErr.message);
+      }
+
       return res.json({
         success: true,
         message: `User registration has been ${status.toLowerCase()} successfully!`,
@@ -521,6 +641,18 @@ router.put('/:id/approval', protect, async (req, res) => {
 
       const returnedUser = user.toObject();
       delete returnedUser.password;
+
+      // Broadcast socket update
+      try {
+        const io = req.app.get('io');
+        if (io) {
+          io.to('role:Manager').emit('approvals:updated');
+          io.emit('users:updated');
+          io.emit('notification:updated');
+        }
+      } catch (sockErr) {
+        console.warn('Socket broadcast notice:', sockErr.message);
+      }
 
       return res.json({
         success: true,

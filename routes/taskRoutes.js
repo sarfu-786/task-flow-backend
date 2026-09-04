@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const Task = require('../models/Task');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
@@ -8,6 +9,9 @@ const { fallbackStore } = require('../config/db');
 
 const VALID_TASK_TYPES = ['internet work', 'documentation', 'social media', 'backend work'];
 const VALID_STATUSES = ['To Do', 'In Progress', 'Completed'];
+
+// Safe regex character escaper
+const escapeRegex = (str) => (str ? str.toString().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '');
 
 // Helper to create Manager Notification when a task is completed or remarked
 const createManagerNotification = async (task, user, completionRemark = '', io = null) => {
@@ -18,11 +22,19 @@ const createManagerNotification = async (task, user, completionRemark = '', io =
     const shortDesc = taskDesc.length > 55 ? taskDesc.substring(0, 52) + '...' : taskDesc;
     const remarkText = completionRemark || task.completionRemark || task.remark || 'Marked as completed';
 
+    const safeUserId = user && user._id && mongoose.Types.ObjectId.isValid(user._id)
+      ? user._id
+      : (task.user && mongoose.Types.ObjectId.isValid(task.user) ? task.user : undefined);
+
+    const safeTaskId = task && task._id && mongoose.Types.ObjectId.isValid(task._id)
+      ? task._id
+      : undefined;
+
     const notifData = {
-      user: user?._id || task.user,
+      user: safeUserId,
       userName: userName,
       userAvatar: userAvatar,
-      taskId: task._id,
+      taskId: safeTaskId,
       taskDescription: taskDesc,
       taskType: task.taskType || 'internet work',
       type: 'task_completed',
@@ -76,14 +88,26 @@ const createUserAssignmentNotification = async (task, targetAssignedTo, targetUs
     const shortDesc = taskDesc.length > 55 ? taskDesc.substring(0, 52) + '...' : taskDesc;
     const instructions = task.remark ? `Instructions: ${task.remark}` : 'Please review the task details and start working on it.';
 
+    const safeManagerId = managerUser && managerUser._id && mongoose.Types.ObjectId.isValid(managerUser._id)
+      ? managerUser._id
+      : undefined;
+
+    const safeRecipientId = targetUserId && mongoose.Types.ObjectId.isValid(targetUserId)
+      ? targetUserId
+      : undefined;
+
+    const safeTaskId = task && task._id && mongoose.Types.ObjectId.isValid(task._id)
+      ? task._id
+      : undefined;
+
     const notifData = {
-      user: managerUser?._id,
-      recipientUser: targetUserId,
-      recipientName: targetAssignedTo,
+      user: safeManagerId,
+      recipientUser: safeRecipientId,
+      recipientName: targetAssignedTo || '',
       userName: managerUser?.name || 'Manager',
       userAvatar: managerUser?.avatar || '',
       assignedBy: assignedBy,
-      taskId: task._id,
+      taskId: safeTaskId,
       taskDescription: taskDesc,
       taskType: task.taskType || 'internet work',
       type: 'task_assigned',
@@ -204,17 +228,26 @@ router.get('/', protect, async (req, res) => {
       const isManager = req.user && ['Manager', 'Executive', 'Administrator'].includes(req.user.role);
 
       if (!isManager || myTasksOnly === 'true') {
-        queryObj.$or = [
-          { assignedTo: new RegExp('^' + req.user.name + '$', 'i') },
-          { assignedTo: new RegExp('^' + req.user.username + '$', 'i') },
-          { user: req.user._id },
-        ];
+        const orConditions = [];
+        if (req.user.name) {
+          orConditions.push({ assignedTo: new RegExp('^' + escapeRegex(req.user.name) + '$', 'i') });
+        }
+        if (req.user.username) {
+          orConditions.push({ assignedTo: new RegExp('^' + escapeRegex(req.user.username) + '$', 'i') });
+        }
+        if (req.user.email) {
+          orConditions.push({ assignedTo: new RegExp('^' + escapeRegex(req.user.email) + '$', 'i') });
+        }
+        if (req.user._id && mongoose.Types.ObjectId.isValid(req.user._id)) {
+          orConditions.push({ user: req.user._id });
+        }
+        queryObj.$or = orConditions.length > 0 ? orConditions : [{ assignedTo: 'none' }];
       } else if (assignedTo && assignedTo !== 'all') {
-        queryObj.assignedTo = new RegExp('^' + assignedTo.trim() + '$', 'i');
+        queryObj.assignedTo = new RegExp('^' + escapeRegex(assignedTo.trim()) + '$', 'i');
       }
 
       if (search && search.trim() !== '') {
-        const regex = new RegExp(search.trim(), 'i');
+        const regex = new RegExp(escapeRegex(search.trim()), 'i');
         const searchConditions = [
           { description: regex },
           { remark: regex },
@@ -374,29 +407,44 @@ router.post('/', protect, async (req, res) => {
       });
     }
 
-    const targetAssignedTo = (assignedTo && assignedTo.trim()) || req.user.name || 'Current User';
+    const targetAssignedTo = (assignedTo && assignedTo.trim()) || req.user?.name || 'Current User';
     const managerAssignedBy =
-      (assignedBy && assignedBy.trim()) || `${req.user.name || 'Manager'} (${req.user.role || 'Manager'})`;
-    let targetUserId = req.user._id;
+      (assignedBy && assignedBy.trim()) || `${req.user?.name || 'Manager'} (${req.user?.role || 'Manager'})`;
+    let targetUserId = null;
 
     if (fallbackStore.isFallback) {
+      const cleanTarget = targetAssignedTo.toLowerCase();
       const matchedUser = fallbackStore.users.find(
         (u) =>
-          (u.name && u.name.trim().toLowerCase() === targetAssignedTo.toLowerCase()) ||
-          (u.username && u.username.trim().toLowerCase() === targetAssignedTo.toLowerCase())
+          (u.name && u.name.trim().toLowerCase() === cleanTarget) ||
+          (u.username && u.username.trim().toLowerCase() === cleanTarget) ||
+          (u.email && u.email.trim().toLowerCase() === cleanTarget) ||
+          (u._id && u._id.toString() === targetAssignedTo)
       );
       if (matchedUser) {
         targetUserId = matchedUser._id;
+      } else if (req.user && req.user._id) {
+        targetUserId = req.user._id;
       }
     } else {
-      const matchedUser = await User.findOne({
-        $or: [
-          { name: new RegExp('^' + targetAssignedTo + '$', 'i') },
-          { username: new RegExp('^' + targetAssignedTo + '$', 'i') },
-        ],
-      });
-      if (matchedUser) {
-        targetUserId = matchedUser._id;
+      if (mongoose.Types.ObjectId.isValid(targetAssignedTo)) {
+        const matchedById = await User.findById(targetAssignedTo);
+        if (matchedById) targetUserId = matchedById._id;
+      }
+      if (!targetUserId) {
+        const escaped = escapeRegex(targetAssignedTo);
+        const matched = await User.findOne({
+          $or: [
+            { name: new RegExp('^' + escaped + '$', 'i') },
+            { username: new RegExp('^' + escaped + '$', 'i') },
+            { email: targetAssignedTo.toLowerCase() },
+          ],
+        });
+        if (matched) {
+          targetUserId = matched._id;
+        } else if (req.user && req.user._id && mongoose.Types.ObjectId.isValid(req.user._id)) {
+          targetUserId = req.user._id;
+        }
       }
     }
 
@@ -410,10 +458,17 @@ router.post('/', protect, async (req, res) => {
       priority: priority || 'Medium',
       assignedTo: targetAssignedTo,
       assignedBy: managerAssignedBy,
-      user: targetUserId,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
+
+    if (targetUserId) {
+      if (fallbackStore.isFallback) {
+        newTaskData.user = targetUserId;
+      } else if (mongoose.Types.ObjectId.isValid(targetUserId)) {
+        newTaskData.user = targetUserId;
+      }
+    }
 
     const io = req.app.get('io');
 
@@ -510,24 +565,36 @@ router.put('/:id', protect, async (req, res) => {
 
     let targetUserId = undefined;
     if (assignedTo && assignedTo.trim()) {
+      const cleanAssigned = assignedTo.trim();
       if (fallbackStore.isFallback) {
+        const cleanTarget = cleanAssigned.toLowerCase();
         const matchedUser = fallbackStore.users.find(
           (u) =>
-            (u.name && u.name.trim().toLowerCase() === assignedTo.trim().toLowerCase()) ||
-            (u.username && u.username.trim().toLowerCase() === assignedTo.trim().toLowerCase())
+            (u.name && u.name.trim().toLowerCase() === cleanTarget) ||
+            (u.username && u.username.trim().toLowerCase() === cleanTarget) ||
+            (u.email && u.email.trim().toLowerCase() === cleanTarget) ||
+            (u._id && u._id.toString() === cleanAssigned)
         );
         if (matchedUser) {
           targetUserId = matchedUser._id;
         }
       } else {
-        const matchedUser = await User.findOne({
-          $or: [
-            { name: new RegExp('^' + assignedTo.trim() + '$', 'i') },
-            { username: new RegExp('^' + assignedTo.trim() + '$', 'i') },
-          ],
-        });
-        if (matchedUser) {
-          targetUserId = matchedUser._id;
+        if (mongoose.Types.ObjectId.isValid(cleanAssigned)) {
+          const matchedById = await User.findById(cleanAssigned);
+          if (matchedById) targetUserId = matchedById._id;
+        }
+        if (!targetUserId) {
+          const escaped = escapeRegex(cleanAssigned);
+          const matchedUser = await User.findOne({
+            $or: [
+              { name: new RegExp('^' + escaped + '$', 'i') },
+              { username: new RegExp('^' + escaped + '$', 'i') },
+              { email: cleanAssigned.toLowerCase() },
+            ],
+          });
+          if (matchedUser && mongoose.Types.ObjectId.isValid(matchedUser._id)) {
+            targetUserId = matchedUser._id;
+          }
         }
       }
     }

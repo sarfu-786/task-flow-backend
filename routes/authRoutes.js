@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
@@ -122,7 +123,7 @@ router.post('/register', async (req, res) => {
       fallbackStore.users.unshift(newUser);
 
       // Create notification for Manager in fallback store
-      fallbackStore.notifications.unshift({
+      const notifItem = {
         _id: 'notif_' + Date.now(),
         userName: newUser.name,
         userAvatar: newUser.avatar,
@@ -134,9 +135,26 @@ router.post('/register', async (req, res) => {
         forRole: 'Manager',
         isRead: false,
         createdAt: new Date(),
-      });
-
+      };
+      fallbackStore.notifications.unshift(notifItem);
       fallbackStore.saveToFile();
+
+      // Real-time socket broadcast to Managers
+      try {
+        const io = req.app.get('io');
+        if (io) {
+          io.to('role:Manager').emit('notification:new', {
+            notification: notifItem,
+            title: 'New User Registration Awaiting Approval',
+            message: notifItem.message,
+            type: 'user_registered',
+          });
+          io.to('role:Manager').emit('approvals:updated');
+          io.emit('users:updated');
+        }
+      } catch (sockErr) {
+        console.warn('Socket broadcast notice:', sockErr.message);
+      }
 
       return res.status(201).json({
         success: true,
@@ -183,8 +201,9 @@ router.post('/register', async (req, res) => {
       });
 
       // Create notification for Manager
+      let createdNotif = null;
       try {
-        await Notification.create({
+        createdNotif = await Notification.create({
           userName: user.name,
           userAvatar: user.avatar || '',
           taskDescription: `Registration Request: ${user.name} (${user.email})`,
@@ -197,6 +216,36 @@ router.post('/register', async (req, res) => {
         });
       } catch (notifErr) {
         console.warn('Notification create warning:', notifErr.message);
+      }
+
+      // Real-time socket broadcast to Managers
+      try {
+        const io = req.app.get('io');
+        if (io) {
+          const payload = {
+            notification: createdNotif || {
+              _id: 'notif_' + Date.now(),
+              userName: user.name,
+              userAvatar: user.avatar || '',
+              taskDescription: `Registration Request: ${user.name} (${user.email})`,
+              taskType: 'general',
+              type: 'user_registered',
+              title: 'New User Registration Awaiting Approval',
+              message: `${user.name} (${user.email}) from department "${user.department}" has registered and is awaiting your approval.`,
+              forRole: 'Manager',
+              isRead: false,
+              createdAt: new Date(),
+            },
+            title: 'New User Registration Awaiting Approval',
+            message: `${user.name} (${user.email}) has registered and is awaiting your approval.`,
+            type: 'user_registered',
+          };
+          io.to('role:Manager').emit('notification:new', payload);
+          io.to('role:Manager').emit('approvals:updated');
+          io.emit('users:updated');
+        }
+      } catch (sockErr) {
+        console.warn('Socket broadcast notice:', sockErr.message);
       }
 
       // Mirror to fallbackStore backup
@@ -604,6 +653,223 @@ router.get('/me', protect, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to retrieve profile data',
+      error: error.message,
+    });
+  }
+});
+
+// @route   PUT /api/auth/profile
+// @desc    Update logged in user's profile details
+// @access  Private
+router.put('/profile', protect, async (req, res) => {
+  try {
+    const userId = req.user._id ? req.user._id.toString() : (req.user.id ? req.user.id.toString() : '');
+    const { name, email, username, department, avatar, password, newPassword } = req.body;
+
+    const targetPassword = (newPassword && newPassword.trim()) ? newPassword.trim() : ((password && password.trim()) ? password.trim() : null);
+
+    if (name !== undefined && !name.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Full name cannot be empty',
+      });
+    }
+
+    let cleanEmail = email !== undefined ? email.trim().toLowerCase() : undefined;
+    if (cleanEmail !== undefined) {
+      if (!cleanEmail) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email address cannot be empty',
+        });
+      }
+      const emailRegex = /\S+@\S+\.\S+/;
+      if (!emailRegex.test(cleanEmail)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please provide a valid email address',
+        });
+      }
+    }
+
+    let cleanUsername = username !== undefined ? username.trim().toLowerCase() : undefined;
+    if (cleanUsername !== undefined && !cleanUsername) {
+      return res.status(400).json({
+        success: false,
+        message: 'Username cannot be empty',
+      });
+    }
+
+    if (targetPassword !== null && targetPassword.length < 4) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 4 characters long',
+      });
+    }
+
+    const existingUserEmail = (req.user.email || '').toLowerCase().trim();
+    const existingUserUsername = (req.user.username || '').toLowerCase().trim();
+
+    if (fallbackStore.isFallback) {
+      const userIndex = fallbackStore.users.findIndex(
+        (u) => (u._id && u._id.toString() === userId) ||
+               (existingUserEmail && u.email && u.email.toLowerCase().trim() === existingUserEmail) ||
+               (existingUserUsername && u.username && u.username.toLowerCase().trim() === existingUserUsername)
+      );
+
+      if (userIndex === -1) {
+        return res.status(404).json({ success: false, message: 'User account not found' });
+      }
+
+      // Check email uniqueness if email changed
+      if (cleanEmail && cleanEmail !== (fallbackStore.users[userIndex].email || '').toLowerCase()) {
+        const emailConflict = fallbackStore.users.find(
+          (u, idx) => idx !== userIndex && u.email && u.email.toLowerCase() === cleanEmail
+        );
+        if (emailConflict) {
+          return res.status(400).json({
+            success: false,
+            message: 'An account with this email address already exists. Please choose a different email.',
+          });
+        }
+      }
+
+      // Check username uniqueness if username changed
+      if (cleanUsername && cleanUsername !== (fallbackStore.users[userIndex].username || '').toLowerCase()) {
+        const usernameConflict = fallbackStore.users.find(
+          (u, idx) => idx !== userIndex && u.username && u.username.toLowerCase() === cleanUsername
+        );
+        if (usernameConflict) {
+          return res.status(400).json({
+            success: false,
+            message: 'This username is already taken. Please choose another username.',
+          });
+        }
+      }
+
+      const existing = fallbackStore.users[userIndex];
+      let newHashedPassword = existing.password;
+      if (targetPassword) {
+        const salt = await bcrypt.genSalt(10);
+        newHashedPassword = await bcrypt.hash(targetPassword, salt);
+      }
+
+      const updatedUser = {
+        ...existing,
+        name: name !== undefined ? name.trim() : existing.name,
+        email: cleanEmail !== undefined ? cleanEmail : existing.email,
+        username: cleanUsername !== undefined ? cleanUsername : existing.username,
+        department: department !== undefined ? department.trim() : existing.department,
+        avatar: avatar !== undefined ? avatar : existing.avatar,
+        password: newHashedPassword,
+      };
+
+      fallbackStore.users[userIndex] = updatedUser;
+      fallbackStore.saveToFile();
+
+      const returnedUser = { ...updatedUser };
+      delete returnedUser.password;
+      const token = generateToken(updatedUser);
+
+      return res.json({
+        success: true,
+        message: 'Profile details updated successfully!',
+        token,
+        user: returnedUser,
+      });
+    } else {
+      let user = null;
+      if (userId && mongoose.Types.ObjectId.isValid(userId)) {
+        user = await User.findById(userId);
+      }
+      if (!user && req.user.email) {
+        user = await User.findOne({ email: req.user.email.toLowerCase() });
+      }
+      if (!user && req.user.username) {
+        user = await User.findOne({ username: req.user.username.toLowerCase() });
+      }
+
+      if (!user) {
+        return res.status(404).json({ success: false, message: 'User account not found' });
+      }
+
+      // Check email uniqueness
+      if (cleanEmail && cleanEmail !== (user.email || '').toLowerCase()) {
+        const emailConflict = await User.findOne({
+          _id: { $ne: user._id },
+          email: cleanEmail,
+        });
+        if (emailConflict) {
+          return res.status(400).json({
+            success: false,
+            message: 'An account with this email address already exists. Please choose a different email.',
+          });
+        }
+      }
+
+      // Check username uniqueness
+      if (cleanUsername && cleanUsername !== (user.username || '').toLowerCase()) {
+        const usernameConflict = await User.findOne({
+          _id: { $ne: user._id },
+          username: cleanUsername,
+        });
+        if (usernameConflict) {
+          return res.status(400).json({
+            success: false,
+            message: 'This username is already taken. Please choose another username.',
+          });
+        }
+      }
+
+      if (name !== undefined) user.name = name.trim();
+      if (cleanEmail !== undefined) user.email = cleanEmail;
+      if (cleanUsername !== undefined) user.username = cleanUsername;
+      if (department !== undefined) user.department = department.trim();
+      if (avatar !== undefined) user.avatar = avatar;
+      if (targetPassword) {
+        user.password = targetPassword;
+      }
+
+      await user.save();
+
+      // Mirror to local store
+      try {
+        const localIdx = fallbackStore.users.findIndex(
+          (u) => (u._id && u._id.toString() === user._id.toString()) ||
+                 (u.email && u.email.toLowerCase() === (user.email || '').toLowerCase())
+        );
+        if (localIdx >= 0) {
+          fallbackStore.users[localIdx] = {
+            ...fallbackStore.users[localIdx],
+            name: user.name,
+            email: user.email,
+            username: user.username,
+            department: user.department,
+            avatar: user.avatar,
+            password: targetPassword ? user.password : fallbackStore.users[localIdx].password,
+          };
+          fallbackStore.saveToFile();
+        }
+      } catch (err) {
+        console.warn('Local backup update notice:', err.message);
+      }
+
+      const returnedUser = user.toObject();
+      delete returnedUser.password;
+      const token = generateToken(user);
+
+      return res.json({
+        success: true,
+        message: 'Profile details updated successfully!',
+        token,
+        user: returnedUser,
+      });
+    }
+  } catch (error) {
+    console.error('Update profile error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update profile details',
       error: error.message,
     });
   }

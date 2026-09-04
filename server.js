@@ -33,8 +33,6 @@ app.set('io', io);
 
 // Socket.io Connection & Room Management
 io.on('connection', (socket) => {
-  console.log(`[Socket.io] Client connected: ${socket.id}`);
-
   // Handle client joining user/role rooms
   socket.on('join', (data) => {
     try {
@@ -43,7 +41,6 @@ io.on('connection', (socket) => {
 
       if (userId) {
         socket.join(`user:${userId.toString()}`);
-        console.log(`[Socket.io] ${socket.id} joined room user:${userId}`);
       }
       if (username) {
         socket.join(`user:${username.toString().toLowerCase().trim()}`);
@@ -56,16 +53,11 @@ io.on('connection', (socket) => {
         if (['Manager', 'Executive', 'Administrator'].includes(role)) {
           socket.join('role:Manager');
         }
-        console.log(`[Socket.io] ${socket.id} joined role:${role}`);
       }
       socket.join('all');
     } catch (err) {
-      console.warn('[Socket.io] Join error:', err.message);
+      // quiet join
     }
-  });
-
-  socket.on('disconnect', (reason) => {
-    console.log(`[Socket.io] Client disconnected: ${socket.id} (${reason})`);
   });
 });
 
