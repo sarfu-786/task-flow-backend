@@ -593,6 +593,19 @@ router.put('/:id/approval', protect, async (req, res) => {
       fallbackStore.users[uIndex].status = status;
       if (department) fallbackStore.users[uIndex].department = department;
       if (role) fallbackStore.users[uIndex].role = role;
+
+      // Automatically mark corresponding registration notifications as read
+      const targetEmail = (fallbackStore.users[uIndex].email || '').toLowerCase();
+      const targetName = (fallbackStore.users[uIndex].name || '').toLowerCase();
+      fallbackStore.notifications.forEach((notif) => {
+        if (
+          notif.type === 'user_registered' &&
+          ((notif.userName && notif.userName.toLowerCase() === targetName) ||
+           (notif.taskDescription && notif.taskDescription.toLowerCase().includes(targetEmail)))
+        ) {
+          notif.isRead = true;
+        }
+      });
       fallbackStore.saveToFile();
 
       const returnedUser = { ...fallbackStore.users[uIndex] };
@@ -602,6 +615,7 @@ router.put('/:id/approval', protect, async (req, res) => {
       try {
         const io = req.app.get('io');
         if (io) {
+          io.emit('approvals:updated');
           io.to('role:Manager').emit('approvals:updated');
           io.emit('users:updated');
           io.emit('notification:updated');
@@ -626,6 +640,23 @@ router.put('/:id/approval', protect, async (req, res) => {
       if (role) user.role = role;
       await user.save();
 
+      // Automatically mark corresponding registration notifications as read in MongoDB
+      try {
+        const Notification = require('../models/Notification');
+        await Notification.updateMany(
+          {
+            type: 'user_registered',
+            $or: [
+              { userName: user.name },
+              { taskDescription: new RegExp(user.email, 'i') },
+            ],
+          },
+          { isRead: true }
+        );
+      } catch (notifErr) {
+        console.warn('Notification read update error:', notifErr.message);
+      }
+
       // Mirror to fallbackStore
       try {
         const localIdx = fallbackStore.users.findIndex((u) => u._id.toString() === id.toString());
@@ -646,6 +677,7 @@ router.put('/:id/approval', protect, async (req, res) => {
       try {
         const io = req.app.get('io');
         if (io) {
+          io.emit('approvals:updated');
           io.to('role:Manager').emit('approvals:updated');
           io.emit('users:updated');
           io.emit('notification:updated');

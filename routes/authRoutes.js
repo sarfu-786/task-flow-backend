@@ -143,12 +143,16 @@ router.post('/register', async (req, res) => {
       try {
         const io = req.app.get('io');
         if (io) {
-          io.to('role:Manager').emit('notification:new', {
+          const payload = {
             notification: notifItem,
             title: 'New User Registration Awaiting Approval',
             message: notifItem.message,
             type: 'user_registered',
-          });
+            forRole: 'Manager',
+          };
+          io.emit('notification:new', payload);
+          io.to('role:Manager').emit('notification:new', payload);
+          io.emit('approvals:updated');
           io.to('role:Manager').emit('approvals:updated');
           io.emit('users:updated');
         }
@@ -223,7 +227,7 @@ router.post('/register', async (req, res) => {
         const io = req.app.get('io');
         if (io) {
           const payload = {
-            notification: createdNotif || {
+            notification: createdNotif ? createdNotif.toObject() : {
               _id: 'notif_' + Date.now(),
               userName: user.name,
               userAvatar: user.avatar || '',
@@ -237,10 +241,13 @@ router.post('/register', async (req, res) => {
               createdAt: new Date(),
             },
             title: 'New User Registration Awaiting Approval',
-            message: `${user.name} (${user.email}) has registered and is awaiting your approval.`,
+            message: `${user.name} (${user.email}) from department "${user.department}" has registered and is awaiting your approval.`,
             type: 'user_registered',
+            forRole: 'Manager',
           };
+          io.emit('notification:new', payload);
           io.to('role:Manager').emit('notification:new', payload);
+          io.emit('approvals:updated');
           io.to('role:Manager').emit('approvals:updated');
           io.emit('users:updated');
         }

@@ -1,6 +1,18 @@
 {
   "users": [
     {
+      "_id": "6a9abcaf04339ce166aba029",
+      "name": "yaseen",
+      "email": "yasu@gmail.com",
+      "username": "yasu",
+      "password": "$2a$10$oxtwMIMxsAquCmcEnO7DKe3WZSdpkbYhlAUrwTLmwseuTmS6puvVy",
+      "role": "User",
+      "department": "Internet Work",
+      "avatar": "",
+      "status": "Approved",
+      "createdAt": "2026-09-04T12:42:23.608Z"
+    },
+    {
       "_id": "6a96a9a1635360bf94f90ab3",
       "name": "Sarfaraj Ahmad",
       "email": "sarfrajahamad068@gmail.com",
@@ -196,6 +208,63 @@
   ],
   "notifications": [
     {
+      "_id": "6a9abc344d61b09174100955",
+      "user": "6a96a9a1635360bf94f90ab3",
+      "recipientUser": "6a9abc334d61b09174100947",
+      "recipientName": "Applicant User",
+      "userName": "Sarfaraj Ahmad",
+      "userAvatar": "",
+      "assignedBy": "Sarfaraj Ahmad (Manager)",
+      "taskId": "6a9abc344d61b09174100953",
+      "taskDescription": "Initial Onboarding Task for Applicant User",
+      "taskType": "internet work",
+      "type": "task_assigned",
+      "title": "New Task Assigned by Sarfaraj Ahmad (Manager)",
+      "message": "Sarfaraj Ahmad (Manager) assigned you a task: \"Initial Onboarding Task for Applicant User\"",
+      "remark": "Instructions: Complete company profile setup and review guidelines",
+      "isRead": false,
+      "forRole": "User",
+      "createdAt": "2026-09-04T12:40:20.204Z",
+      "__v": 0
+    },
+    {
+      "_id": "6a9abc334d61b09174100949",
+      "recipientName": "",
+      "userName": "Applicant User",
+      "userAvatar": "",
+      "assignedBy": "",
+      "taskDescription": "Registration Request: Applicant User (applicant.test@taskflow.com)",
+      "taskType": "general",
+      "type": "user_registered",
+      "title": "New User Registration Awaiting Approval",
+      "message": "Applicant User (applicant.test@taskflow.com) from department \"Internet Work\" has registered and is awaiting your approval.",
+      "remark": "",
+      "isRead": true,
+      "forRole": "Manager",
+      "createdAt": "2026-09-04T12:40:19.851Z",
+      "__v": 0
+    },
+    {
+      "_id": "6a9ab9b9c45a2552eff7a59a",
+      "user": "6a96a9a1635360bf94f90ab3",
+      "recipientUser": "6a9ab3ee48ec1e078d580de1",
+      "recipientName": "Adil",
+      "userName": "Sarfaraj Ahmad",
+      "userAvatar": "",
+      "assignedBy": "Sarfaraj Ahmad (Manager)",
+      "taskId": "6a9ab9b9c45a2552eff7a598",
+      "taskDescription": "edit your profile on social media",
+      "taskType": "social media",
+      "type": "task_assigned",
+      "title": "New Task Assigned by Sarfaraj Ahmad (Manager)",
+      "message": "Sarfaraj Ahmad (Manager) assigned you a task: \"edit your profile on social media\"",
+      "remark": "Instructions: do it very fast",
+      "isRead": true,
+      "forRole": "User",
+      "createdAt": "2026-09-04T12:29:45.705Z",
+      "__v": 0
+    },
+    {
       "_id": "6a9ab943d813de4244c48577",
       "user": "6a96a9a1635360bf94f90ab3",
       "recipientUser": "6a9ab943d813de4244c4856a",
@@ -213,23 +282,6 @@
       "isRead": false,
       "forRole": "User",
       "createdAt": "2026-09-04T12:27:47.424Z",
-      "__v": 0
-    },
-    {
-      "_id": "6a9ab943d813de4244c4856c",
-      "recipientName": "",
-      "userName": "Applicant User",
-      "userAvatar": "",
-      "assignedBy": "",
-      "taskDescription": "Registration Request: Applicant User (applicant.test@taskflow.com)",
-      "taskType": "general",
-      "type": "user_registered",
-      "title": "New User Registration Awaiting Approval",
-      "message": "Applicant User (applicant.test@taskflow.com) from department \"Internet Work\" has registered and is awaiting your approval.",
-      "remark": "",
-      "isRead": false,
-      "forRole": "Manager",
-      "createdAt": "2026-09-04T12:27:47.117Z",
       "__v": 0
     },
     {
@@ -253,5 +305,5 @@
       "__v": 0
     }
   ],
-  "savedAt": "2026-09-04T12:30:32.972Z"
+  "savedAt": "2026-09-04T12:42:48.328Z"
 }
