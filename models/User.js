@@ -30,7 +30,7 @@ const userSchema = new mongoose.Schema({
     },
   role: {
     type: String,
-    enum: ['Manager', 'Executive', 'Administrator', 'User'],
+    enum: ['Super Admin', 'Manager', 'Executive', 'Administrator', 'User'],
     default: 'User',
   },
   department: {
@@ -45,6 +45,32 @@ const userSchema = new mongoose.Schema({
     type: String,
     enum: ['Approved', 'Pending', 'Rejected'],
     default: 'Approved',
+  },
+  reportsTo: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+  },
+  reportsToName: {
+    type: String,
+    default: '',
+  },
+  nodeId: {
+    type: String,
+    default: '',
+  },
+  nodeType: {
+    type: String,
+    default: '',
+  },
+  reportsToNode: {
+    type: String,
+    default: '',
+  },
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
   },
   createdAt: {
     type: Date,

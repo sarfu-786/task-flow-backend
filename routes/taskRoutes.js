@@ -162,17 +162,112 @@ const createUserAssignmentNotification = async (task, targetAssignedTo, targetUs
   }
 };
 
+/**
+ * Validates organizational hierarchy task assignment rules:
+ * 1. Super Admin can ONLY assign tasks directly to Managers/Seniors.
+ * 2. Managers can ONLY assign tasks to their junior team members (direct subordinates).
+ * 3. Regular employees cannot assign tasks to other team members.
+ */
+const validateHierarchyAssignment = async (assignerUser, targetAssignedTo) => {
+  if (!assignerUser || !targetAssignedTo) return { valid: true };
+
+  const assignerRole = assignerUser.role || 'User';
+  const isSuperAdmin = assignerRole === 'Super Admin';
+  const isManager = ['Manager', 'Executive', 'Administrator'].includes(assignerRole);
+  const assignerId = (assignerUser._id ? assignerUser._id.toString() : (assignerUser.id ? assignerUser.id.toString() : '')).trim();
+  const assignerName = (assignerUser.name || '').toLowerCase().trim();
+
+  let targetUser = null;
+  const cleanTarget = targetAssignedTo.toString().trim().toLowerCase();
+
+  if (fallbackStore.isFallback) {
+    targetUser = fallbackStore.users.find(
+      (u) =>
+        (u.name && u.name.trim().toLowerCase() === cleanTarget) ||
+        (u.username && u.username.trim().toLowerCase() === cleanTarget) ||
+        (u.email && u.email.trim().toLowerCase() === cleanTarget) ||
+        (u._id && u._id.toString() === targetAssignedTo.toString().trim())
+    );
+  } else {
+    if (mongoose.Types.ObjectId.isValid(targetAssignedTo)) {
+      targetUser = await User.findById(targetAssignedTo).lean();
+    }
+    if (!targetUser) {
+      const escaped = escapeRegex(targetAssignedTo.toString().trim());
+      targetUser = await User.findOne({
+        $or: [
+          { name: new RegExp('^' + escaped + '$', 'i') },
+          { username: new RegExp('^' + escaped + '$', 'i') },
+          { email: cleanTarget },
+        ],
+      }).lean();
+    }
+  }
+
+  if (!targetUser) {
+    return { valid: true, targetUser: null };
+  }
+
+  const targetId = (targetUser._id ? targetUser._id.toString() : (targetUser.id ? targetUser.id.toString() : '')).trim();
+  const targetRole = targetUser.role || 'User';
+  const targetIsManager = ['Manager', 'Executive', 'Administrator', 'Super Admin'].includes(targetRole);
+
+  // Self-assignment is always permitted for personal tracking
+  if (assignerId && targetId && assignerId === targetId) {
+    return { valid: true, targetUser };
+  }
+
+  // 1. Super Admin can ONLY assign tasks to Managers
+  if (isSuperAdmin) {
+    if (!targetIsManager) {
+      return {
+        valid: false,
+        message: `Hierarchy Constraint: Super Admin can only assign tasks directly to Managers in the hierarchy. Managers will then assign tasks to their juniors. ('${targetUser.name}' has role '${targetRole}')`,
+        targetUser,
+      };
+    }
+    return { valid: true, targetUser };
+  }
+
+  // 2. Managers can ONLY assign tasks to their juniors (direct subordinates)
+  if (isManager) {
+    const targetReportsTo = targetUser.reportsTo ? (targetUser.reportsTo._id || targetUser.reportsTo).toString() : '';
+    const targetReportsToName = (targetUser.reportsToName || '').toLowerCase().trim();
+
+    const isDirectJunior =
+      (targetReportsTo && targetReportsTo === assignerId) ||
+      (targetReportsToName && (targetReportsToName.includes(assignerName) || assignerName.includes(targetReportsToName)));
+
+    if (!isDirectJunior) {
+      return {
+        valid: false,
+        message: `Hierarchy Constraint: Managers can only assign tasks to junior team members who report directly to them. ('${targetUser.name}' does not report to you)`,
+        targetUser,
+      };
+    }
+    return { valid: true, targetUser };
+  }
+
+  // 3. Regular employees cannot assign tasks to others
+  return {
+    valid: false,
+    message: 'Hierarchy Constraint: Employees cannot assign tasks to other team members. Tasks are assigned by your reporting manager.',
+    targetUser,
+  };
+};
+
 // @route   GET /api/tasks
 // @desc    Get all tasks with optional search, type, status, and assignedTo filtering
 // @access  Private
 router.get('/', protect, async (req, res) => {
   try {
-    const { search, taskType, status, assignedTo, myTasksOnly } = req.query;
+    const { search, taskType, status, assignedTo, myTasksOnly, teamOnly } = req.query;
 
     if (fallbackStore.isFallback) {
       let filtered = [...fallbackStore.tasks];
 
-      const isManager = req.user && ['Manager', 'Executive', 'Administrator'].includes(req.user.role);
+      const isSuperAdmin = req.user && req.user.role === 'Super Admin';
+      const isManager = req.user && ['Super Admin', 'Manager', 'Executive', 'Administrator'].includes(req.user.role);
       
       if (!isManager || myTasksOnly === 'true') {
         const userName = req.user.name ? req.user.name.toLowerCase() : '';
@@ -183,6 +278,22 @@ router.get('/', protect, async (req, res) => {
           const tAssigned = (t.assignedTo || '').toLowerCase();
           const tUser = t.user ? t.user.toString() : '';
           return tAssigned === userName || tAssigned === userUsername || tUser === userId;
+        });
+      } else if (teamOnly === 'true' && !isSuperAdmin) {
+        // Manager's team tasks: tasks assigned to the manager or any user reporting to this manager
+        const managerId = req.user._id ? req.user._id.toString() : '';
+        const managerName = (req.user.name || '').toLowerCase();
+        const subordinateNames = fallbackStore.users
+          .filter(u => 
+            (u.reportsTo && u.reportsTo.toString() === managerId) ||
+            (u.reportsToName && u.reportsToName.toLowerCase().includes(managerName))
+          )
+          .map(u => (u.name || '').toLowerCase());
+        
+        const validAssignees = [managerName, (req.user.username || '').toLowerCase(), ...subordinateNames];
+        filtered = filtered.filter((t) => {
+          const tAssigned = (t.assignedTo || '').toLowerCase();
+          return validAssignees.includes(tAssigned);
         });
       } else if (assignedTo && assignedTo !== 'all') {
         filtered = filtered.filter(
@@ -225,7 +336,8 @@ router.get('/', protect, async (req, res) => {
     } else {
       const queryObj = {};
 
-      const isManager = req.user && ['Manager', 'Executive', 'Administrator'].includes(req.user.role);
+      const isSuperAdmin = req.user && req.user.role === 'Super Admin';
+      const isManager = req.user && ['Super Admin', 'Manager', 'Executive', 'Administrator'].includes(req.user.role);
 
       if (!isManager || myTasksOnly === 'true') {
         const orConditions = [];
@@ -242,6 +354,17 @@ router.get('/', protect, async (req, res) => {
           orConditions.push({ user: req.user._id });
         }
         queryObj.$or = orConditions.length > 0 ? orConditions : [{ assignedTo: 'none' }];
+      } else if (teamOnly === 'true' && !isSuperAdmin) {
+        const managerId = req.user._id ? req.user._id.toString() : '';
+        const managerName = req.user.name || '';
+        const subordinates = await User.find({
+          $or: [
+            { reportsTo: req.user._id },
+            { reportsToName: new RegExp(escapeRegex(managerName), 'i') },
+          ]
+        }).select('name username');
+        const names = [managerName, req.user.username, ...subordinates.map(s => s.name), ...subordinates.map(s => s.username)].filter(Boolean);
+        queryObj.assignedTo = { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) };
       } else if (assignedTo && assignedTo !== 'all') {
         queryObj.assignedTo = new RegExp('^' + escapeRegex(assignedTo.trim()) + '$', 'i');
       }
@@ -296,12 +419,13 @@ router.get('/', protect, async (req, res) => {
 // @access  Private
 router.get('/stats', protect, async (req, res) => {
   try {
-    const isManager = req.user && ['Manager', 'Executive', 'Administrator'].includes(req.user.role);
-    const { myTasksOnly } = req.query;
+    const isSuperAdmin = req.user && req.user.role === 'Super Admin';
+    const isManager = req.user && ['Super Admin', 'Manager', 'Executive', 'Administrator'].includes(req.user.role);
+    const { myTasksOnly, teamOnly } = req.query;
 
     let allTasks = [];
     if (fallbackStore.isFallback) {
-      allTasks = fallbackStore.tasks;
+      allTasks = [...fallbackStore.tasks];
     } else {
       allTasks = await Task.find({});
     }
@@ -315,6 +439,33 @@ router.get('/stats', protect, async (req, res) => {
         const tAssigned = (t.assignedTo || '').toLowerCase();
         const tUser = t.user ? t.user.toString() : '';
         return tAssigned === userName || tAssigned === userUsername || tUser === userId;
+      });
+    } else if (teamOnly === 'true' && !isSuperAdmin) {
+      const managerId = req.user._id ? req.user._id.toString() : '';
+      const managerName = (req.user.name || '').toLowerCase();
+      
+      let subordinateNames = [];
+      if (fallbackStore.isFallback) {
+        subordinateNames = fallbackStore.users
+          .filter(u => 
+            (u.reportsTo && u.reportsTo.toString() === managerId) ||
+            (u.reportsToName && u.reportsToName.toLowerCase().includes(managerName))
+          )
+          .map(u => (u.name || '').toLowerCase());
+      } else {
+        const subs = await User.find({
+          $or: [
+            { reportsTo: req.user._id },
+            { reportsToName: new RegExp(escapeRegex(req.user.name || ''), 'i') },
+          ]
+        }).select('name username');
+        subordinateNames = subs.map(s => (s.name || '').toLowerCase());
+      }
+
+      const validAssignees = [managerName, (req.user.username || '').toLowerCase(), ...subordinateNames];
+      allTasks = allTasks.filter((t) => {
+        const tAssigned = (t.assignedTo || '').toLowerCase();
+        return validAssignees.includes(tAssigned);
       });
     }
 
@@ -408,42 +559,54 @@ router.post('/', protect, async (req, res) => {
     }
 
     const targetAssignedTo = (assignedTo && assignedTo.trim()) || req.user?.name || 'Current User';
+    
+    // Validate organizational hierarchy task assignment rules
+    const hierarchyCheck = await validateHierarchyAssignment(req.user, targetAssignedTo);
+    if (!hierarchyCheck.valid) {
+      return res.status(400).json({
+        success: false,
+        message: hierarchyCheck.message,
+      });
+    }
+
     const managerAssignedBy =
       (assignedBy && assignedBy.trim()) || `${req.user?.name || 'Manager'} (${req.user?.role || 'Manager'})`;
-    let targetUserId = null;
+    let targetUserId = hierarchyCheck.targetUser?._id || null;
 
-    if (fallbackStore.isFallback) {
-      const cleanTarget = targetAssignedTo.toLowerCase();
-      const matchedUser = fallbackStore.users.find(
-        (u) =>
-          (u.name && u.name.trim().toLowerCase() === cleanTarget) ||
-          (u.username && u.username.trim().toLowerCase() === cleanTarget) ||
-          (u.email && u.email.trim().toLowerCase() === cleanTarget) ||
-          (u._id && u._id.toString() === targetAssignedTo)
-      );
-      if (matchedUser) {
-        targetUserId = matchedUser._id;
-      } else if (req.user && req.user._id) {
-        targetUserId = req.user._id;
-      }
-    } else {
-      if (mongoose.Types.ObjectId.isValid(targetAssignedTo)) {
-        const matchedById = await User.findById(targetAssignedTo);
-        if (matchedById) targetUserId = matchedById._id;
-      }
-      if (!targetUserId) {
-        const escaped = escapeRegex(targetAssignedTo);
-        const matched = await User.findOne({
-          $or: [
-            { name: new RegExp('^' + escaped + '$', 'i') },
-            { username: new RegExp('^' + escaped + '$', 'i') },
-            { email: targetAssignedTo.toLowerCase() },
-          ],
-        });
-        if (matched) {
-          targetUserId = matched._id;
-        } else if (req.user && req.user._id && mongoose.Types.ObjectId.isValid(req.user._id)) {
+    if (!targetUserId) {
+      if (fallbackStore.isFallback) {
+        const cleanTarget = targetAssignedTo.toLowerCase();
+        const matchedUser = fallbackStore.users.find(
+          (u) =>
+            (u.name && u.name.trim().toLowerCase() === cleanTarget) ||
+            (u.username && u.username.trim().toLowerCase() === cleanTarget) ||
+            (u.email && u.email.trim().toLowerCase() === cleanTarget) ||
+            (u._id && u._id.toString() === targetAssignedTo)
+        );
+        if (matchedUser) {
+          targetUserId = matchedUser._id;
+        } else if (req.user && req.user._id) {
           targetUserId = req.user._id;
+        }
+      } else {
+        if (mongoose.Types.ObjectId.isValid(targetAssignedTo)) {
+          const matchedById = await User.findById(targetAssignedTo);
+          if (matchedById) targetUserId = matchedById._id;
+        }
+        if (!targetUserId) {
+          const escaped = escapeRegex(targetAssignedTo);
+          const matched = await User.findOne({
+            $or: [
+              { name: new RegExp('^' + escaped + '$', 'i') },
+              { username: new RegExp('^' + escaped + '$', 'i') },
+              { email: targetAssignedTo.toLowerCase() },
+            ],
+          });
+          if (matched) {
+            targetUserId = matched._id;
+          } else if (req.user && req.user._id && mongoose.Types.ObjectId.isValid(req.user._id)) {
+            targetUserId = req.user._id;
+          }
         }
       }
     }
@@ -566,7 +729,19 @@ router.put('/:id', protect, async (req, res) => {
     let targetUserId = undefined;
     if (assignedTo && assignedTo.trim()) {
       const cleanAssigned = assignedTo.trim();
-      if (fallbackStore.isFallback) {
+
+      // Validate hierarchy rules if assignee is changing
+      const hierarchyCheck = await validateHierarchyAssignment(req.user, cleanAssigned);
+      if (!hierarchyCheck.valid) {
+        return res.status(400).json({
+          success: false,
+          message: hierarchyCheck.message,
+        });
+      }
+
+      if (hierarchyCheck.targetUser && hierarchyCheck.targetUser._id) {
+        targetUserId = hierarchyCheck.targetUser._id;
+      } else if (fallbackStore.isFallback) {
         const cleanTarget = cleanAssigned.toLowerCase();
         const matchedUser = fallbackStore.users.find(
           (u) =>

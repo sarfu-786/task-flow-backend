@@ -7,9 +7,12 @@ const initialUsers = [
     email: 'sarfrajahamad068@gmail.com',
     username: 'sarfraj',
     password: '998466',
-    role: 'Manager',
-    department: 'Management',
+    role: 'Super Admin',
+    department: 'Executive Leadership',
     avatar: '',
+    reportsTo: null,
+    reportsToName: '',
+    status: 'Approved',
     createdAt: new Date('2026-01-15T09:00:00Z'),
   },
   {
@@ -21,6 +24,10 @@ const initialUsers = [
     role: 'Executive',
     department: 'System Architecture',
     avatar: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=150&auto=format&fit=crop&q=80',
+    nodeId: 'B',
+    nodeType: 'Inner',
+    reportsToNode: 'A',
+    status: 'Approved',
     createdAt: new Date('2026-01-10T08:30:00Z'),
   },
   {
@@ -32,6 +39,10 @@ const initialUsers = [
     role: 'User',
     department: 'Backend Engineering',
     avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80',
+    nodeId: 'E',
+    nodeType: 'Leaf',
+    reportsToNode: 'B',
+    status: 'Approved',
     createdAt: new Date('2026-02-01T10:00:00Z'),
   },
   {
@@ -43,6 +54,10 @@ const initialUsers = [
     role: 'User',
     department: 'Content & Documentation',
     avatar: 'https://images.unsplash.com/photo-1580489944761-15a19d654956?w=150&auto=format&fit=crop&q=80',
+    nodeId: 'D',
+    nodeType: 'Leaf',
+    reportsToNode: 'B',
+    status: 'Approved',
     createdAt: new Date('2026-02-10T11:00:00Z'),
   },
   {
@@ -54,6 +69,10 @@ const initialUsers = [
     role: 'Manager',
     department: 'Cloud Infrastructure',
     avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=150&auto=format&fit=crop&q=80',
+    nodeId: '',
+    nodeType: '',
+    reportsToNode: '',
+    status: 'Approved',
     createdAt: new Date('2026-02-15T09:30:00Z'),
   },
   {
@@ -65,6 +84,10 @@ const initialUsers = [
     role: 'User',
     department: 'Digital Marketing',
     avatar: 'https://images.unsplash.com/photo-1567532939604-b6b5b0db2604?w=150&auto=format&fit=crop&q=80',
+    nodeId: 'F',
+    nodeType: 'Inner',
+    reportsToNode: 'C',
+    status: 'Approved',
     createdAt: new Date('2026-02-20T14:00:00Z'),
   },
   {
@@ -76,6 +99,10 @@ const initialUsers = [
     role: 'Executive',
     department: 'Operations & Strategy',
     avatar: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=150&auto=format&fit=crop&q=80',
+    nodeId: 'C',
+    nodeType: 'Inner',
+    reportsToNode: 'A',
+    status: 'Approved',
     createdAt: new Date('2026-02-22T10:00:00Z'),
   },
   {
@@ -87,6 +114,10 @@ const initialUsers = [
     role: 'User',
     department: 'Quality Assurance',
     avatar: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=150&auto=format&fit=crop&q=80',
+    nodeId: 'G',
+    nodeType: 'Leaf',
+    reportsToNode: 'F',
+    status: 'Approved',
     createdAt: new Date('2026-02-25T11:00:00Z'),
   }
 ];
@@ -318,9 +349,11 @@ const seedDatabase = async (isFallback, User, Task, fallbackStore, Notification)
             email: managerEmail,
             username: 'sarfraj',
             password: hashedPassword,
-            role: 'Manager',
-            department: 'Management',
+            role: 'Super Admin',
+            department: 'Executive Leadership',
             avatar: '',
+            reportsTo: null,
+            reportsToName: '',
             status: 'Approved',
             createdAt: new Date(),
           }
@@ -339,7 +372,7 @@ const seedDatabase = async (isFallback, User, Task, fallbackStore, Notification)
           const current = fallbackStore.users[managerIndex];
           fallbackStore.users[managerIndex] = {
             ...current,
-            role: 'Manager',
+            role: 'Super Admin',
             status: 'Approved',
             // Keep existing password safe and unchanged
             password: current.password || (await bcrypt.hash(managerPassword, await bcrypt.genSalt(10))),
@@ -354,9 +387,11 @@ const seedDatabase = async (isFallback, User, Task, fallbackStore, Notification)
             email: managerEmail,
             username: 'sarfraj',
             password: hashedPassword,
-            role: 'Manager',
-            department: 'Management',
+            role: 'Super Admin',
+            department: 'Executive Leadership',
             avatar: '',
+            reportsTo: null,
+            reportsToName: '',
             status: 'Approved',
             createdAt: new Date(),
           });
@@ -374,14 +409,16 @@ const seedDatabase = async (isFallback, User, Task, fallbackStore, Notification)
             email: managerEmail,
             username: 'sarfraj',
             password: managerPassword,
-            role: 'Manager',
-            department: 'Management',
+            role: 'Super Admin',
+            department: 'Executive Leadership',
+            reportsTo: null,
+            reportsToName: '',
             status: 'Approved',
           });
         } else {
           let updated = false;
-          if (manager.role !== 'Manager') {
-            manager.role = 'Manager';
+          if (manager.role !== 'Super Admin') {
+            manager.role = 'Super Admin';
             updated = true;
           }
           if (manager.status !== 'Approved') {

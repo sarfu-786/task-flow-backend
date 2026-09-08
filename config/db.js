@@ -19,8 +19,15 @@ const fallbackStore = {
   users: [],
   tasks: [],
   notifications: [],
-  isFallback: false,
+  _isFallback: true,
   dbError: null,
+
+  get isFallback() {
+    return this._isFallback || !mongoose.connection || mongoose.connection.readyState !== 1;
+  },
+  set isFallback(val) {
+    this._isFallback = val;
+  },
 
   saveToFile() {
     try {
@@ -65,6 +72,11 @@ const fallbackStore = {
       try {
         await User.updateMany({ status: { $exists: false } }, { $set: { status: 'Approved' } });
         await User.updateMany({ status: null }, { $set: { status: 'Approved' } });
+        // Ensure Sarfaraj is Super Admin
+        await User.updateMany(
+          { $or: [{ email: 'sarfrajahamad068@gmail.com' }, { username: 'sarfraj' }] },
+          { $set: { role: 'Super Admin' } }
+        );
       } catch (migErr) {
         console.warn('[Database Migration Notice]', migErr.message);
       }
@@ -88,6 +100,12 @@ const fallbackStore = {
               role: localUser.role || 'User',
               department: localUser.department || 'Operations',
               avatar: localUser.avatar || '',
+              reportsTo: localUser.reportsTo || null,
+              reportsToName: localUser.reportsToName || '',
+              nodeId: localUser.nodeId || '',
+              nodeType: localUser.nodeType || '',
+              reportsToNode: localUser.reportsToNode || '',
+              createdBy: localUser.createdBy || null,
               status: localUser.status || 'Approved',
               createdAt: localUser.createdAt ? new Date(localUser.createdAt) : new Date(),
             });
@@ -117,6 +135,12 @@ const fallbackStore = {
         role: u.role,
         department: u.department,
         avatar: u.avatar || '',
+        reportsTo: u.reportsTo || null,
+        reportsToName: u.reportsToName || '',
+        nodeId: u.nodeId || '',
+        nodeType: u.nodeType || '',
+        reportsToNode: u.reportsToNode || '',
+        createdBy: u.createdBy ? u.createdBy.toString() : null,
         status: u.status || 'Approved',
         createdAt: u.createdAt,
       }));
@@ -198,34 +222,36 @@ const connectDB = async () => {
     // Connection event listeners
     mongoose.connection.on('connected', () => {
       console.log(`[MongoDB Event] Connected to database: ${mongoose.connection.name}`);
-      fallbackStore.isFallback = false;
+      fallbackStore._isFallback = false;
       fallbackStore.dbError = null;
     });
 
     mongoose.connection.on('error', (err) => {
       console.error(`[MongoDB Event] Connection error:`, err.message);
+      fallbackStore._isFallback = true;
       fallbackStore.dbError = err.message;
     });
 
     mongoose.connection.on('disconnected', () => {
       console.warn(`[MongoDB Event] Disconnected from Atlas.`);
+      fallbackStore._isFallback = true;
     });
 
     await mongoose.connect(mongoURI, {
-      serverSelectionTimeoutMS: 15000,
-      socketTimeoutMS: 45000,
+      serverSelectionTimeoutMS: 2500,
+      socketTimeoutMS: 10000,
       family: 4, // Force IPv4 to prevent Windows DNS IPv6 resolution failure (ENOTFOUND)
       maxPoolSize: 10,
     });
 
     console.log(`[Database] MongoDB Connected Successfully to Atlas DB: ${mongoose.connection.name}`);
-    fallbackStore.isFallback = false;
+    fallbackStore._isFallback = false;
     fallbackStore.dbError = null;
     return { isFallback: false };
   } catch (error) {
-    console.error(`[Database Error] MongoDB connection failed:`, error.message);
-    console.log(`[Database] Initializing persistent file-backed local database store...`);
-    fallbackStore.isFallback = true;
+    console.warn(`[Database Notice] MongoDB Atlas connection unavailable:`, error.message);
+    console.log(`[Database] Instantly operating on persistent file-backed local database store.`);
+    fallbackStore._isFallback = true;
     fallbackStore.dbError = error.message;
     fallbackStore.loadFromFile();
     return { isFallback: true };

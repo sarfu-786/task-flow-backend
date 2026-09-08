@@ -80,6 +80,7 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/tasks', require('./routes/taskRoutes'));
 app.use('/api/users', require('./routes/userRoutes'));
+app.use('/api/hierarchy', require('./routes/hierarchyRoutes'));
 app.use('/api/notifications', require('./routes/notificationRoutes'));
 
 const mongoose = require('mongoose');

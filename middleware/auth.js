@@ -61,6 +61,8 @@ const protect = async (req, res, next) => {
             department: localUser.department || 'Internet Work',
             avatar: localUser.avatar || '',
             status: localUser.status || 'Approved',
+            reportsTo: localUser.reportsTo || null,
+            reportsToName: localUser.reportsToName || '',
           };
         }
       }
@@ -76,6 +78,8 @@ const protect = async (req, res, next) => {
           department: 'Internet Work',
           avatar: '',
           status: 'Approved',
+          reportsTo: decoded.reportsTo || null,
+          reportsToName: decoded.reportsToName || '',
         };
       }
 
