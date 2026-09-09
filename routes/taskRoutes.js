@@ -7,7 +7,7 @@ const Notification = require('../models/Notification');
 const { protect } = require('../middleware/auth');
 const { fallbackStore } = require('../config/db');
 
-const VALID_TASK_TYPES = ['internet work', 'documentation', 'social media', 'backend work'];
+const VALID_TASK_TYPES = ['internet work', 'documentation', 'social media', 'backend work', 'sells', 'sales'];
 const VALID_STATUSES = ['To Do', 'In Progress', 'Completed'];
 
 // Safe regex character escaper
@@ -494,6 +494,7 @@ router.get('/stats', protect, async (req, res) => {
       'documentation': allTasks.filter((t) => t.taskType === 'documentation').length,
       'social media': allTasks.filter((t) => t.taskType === 'social media').length,
       'backend work': allTasks.filter((t) => t.taskType === 'backend work').length,
+      'sells': allTasks.filter((t) => t.taskType === 'sells' || t.taskType === 'sales').length,
     };
 
     const now = new Date();

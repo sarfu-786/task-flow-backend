@@ -5,7 +5,7 @@ const taskSchema = new mongoose.Schema({
     type: String,
     required: [true, 'Task type is required'],
     enum: {
-      values: ['internet work', 'documentation', 'social media', 'backend work'],
+      values: ['internet work', 'documentation', 'social media', 'backend work', 'sells', 'sales'],
       message: '{VALUE} is not a supported task type',
     },
     lowercase: true,
