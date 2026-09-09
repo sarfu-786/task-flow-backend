@@ -164,9 +164,11 @@ const createUserAssignmentNotification = async (task, targetAssignedTo, targetUs
 
 /**
  * Validates organizational hierarchy task assignment rules:
- * 1. Super Admin can ONLY assign tasks directly to Managers/Seniors.
- * 2. Managers can ONLY assign tasks to their junior team members (direct subordinates).
- * 3. Regular employees cannot assign tasks to other team members.
+ * 1. Super Admin can assign tasks to any junior user or manager across the organization.
+ * 2. Managers can ONLY assign tasks to their junior team members (direct/indirect subordinates).
+ * 3. Nobody can assign tasks to seniors (e.g. Manager cannot assign to Super Admin).
+ * 4. Nobody can assign tasks to themselves.
+ * 5. Regular users cannot assign tasks to others.
  */
 const validateHierarchyAssignment = async (assignerUser, targetAssignedTo) => {
   if (!assignerUser || !targetAssignedTo) return { valid: true };
@@ -210,27 +212,38 @@ const validateHierarchyAssignment = async (assignerUser, targetAssignedTo) => {
 
   const targetId = (targetUser._id ? targetUser._id.toString() : (targetUser.id ? targetUser.id.toString() : '')).trim();
   const targetRole = targetUser.role || 'User';
-  const targetIsManager = ['Manager', 'Executive', 'Administrator', 'Super Admin'].includes(targetRole);
 
-  // Self-assignment is always permitted for personal tracking
+  // 1. Rule: Nobody can assign tasks to themselves ("not himself")
   if (assignerId && targetId && assignerId === targetId) {
-    return { valid: true, targetUser };
+    return {
+      valid: false,
+      message: 'Hierarchy Constraint: You cannot assign a task to yourself. Tasks can only be assigned to junior team members.',
+      targetUser,
+    };
   }
 
-  // 1. Super Admin can ONLY assign tasks to Managers
+  // 2. Super Admin: Can assign tasks to everybody in the organization (all juniors below Super Admin)
   if (isSuperAdmin) {
-    if (!targetIsManager) {
+    if (targetRole === 'Super Admin' && targetId !== assignerId) {
       return {
         valid: false,
-        message: `Hierarchy Constraint: Super Admin can only assign tasks directly to Managers in the hierarchy. Managers will then assign tasks to their juniors. ('${targetUser.name}' has role '${targetRole}')`,
+        message: 'Hierarchy Constraint: Super Admin cannot assign tasks to peer Super Admins. Tasks can only be assigned to junior users and managers.',
         targetUser,
       };
     }
     return { valid: true, targetUser };
   }
 
-  // 2. Managers can ONLY assign tasks to their juniors (direct subordinates)
+  // 3. Manager: Can ONLY assign tasks to junior team members reporting to them, NOT seniors (Super Admin)
   if (isManager) {
+    if (targetRole === 'Super Admin') {
+      return {
+        valid: false,
+        message: 'Hierarchy Constraint: Managers cannot assign tasks to seniors (Super Admin). Tasks can only be assigned to your junior subordinates.',
+        targetUser,
+      };
+    }
+
     const targetReportsTo = targetUser.reportsTo ? (targetUser.reportsTo._id || targetUser.reportsTo).toString() : '';
     const targetReportsToName = (targetUser.reportsToName || '').toLowerCase().trim();
 
@@ -248,10 +261,10 @@ const validateHierarchyAssignment = async (assignerUser, targetAssignedTo) => {
     return { valid: true, targetUser };
   }
 
-  // 3. Regular employees cannot assign tasks to others
+  // 4. Regular users cannot assign tasks to others
   return {
     valid: false,
-    message: 'Hierarchy Constraint: Employees cannot assign tasks to other team members. Tasks are assigned by your reporting manager.',
+    message: 'Hierarchy Constraint: Users cannot assign tasks to seniors or other team members. Tasks are assigned by your reporting manager or Super Admin.',
     targetUser,
   };
 };

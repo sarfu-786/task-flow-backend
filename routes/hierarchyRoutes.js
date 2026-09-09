@@ -88,7 +88,15 @@ const buildHierarchyTree = (users, tasks, targetRootUserId = null) => {
   // Build parent -> children relationship map
   const childrenMap = new Map();
   users.forEach((u) => {
-    const repId = u.reportsTo ? u.reportsTo.toString() : 'ROOT';
+    let repId = 'ROOT';
+    if (u.reportsTo && (idMap.has(u.reportsTo.toString()) || targetRootUserId)) {
+      repId = u.reportsTo.toString();
+    } else if (u.createdBy && idMap.has(u.createdBy.toString())) {
+      repId = u.createdBy.toString();
+    } else if (u.reportsTo) {
+      repId = u.reportsTo.toString();
+    }
+
     if (!childrenMap.has(repId)) {
       childrenMap.set(repId, []);
     }

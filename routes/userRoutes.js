@@ -237,22 +237,16 @@ router.post('/', protect, async (req, res) => {
     const cleanUsername = username.trim().toLowerCase();
     const userPassword = password && password.trim() ? password.trim() : 'user123';
 
-    // Authorization: Only Super Admin and Managers can add employees
+    // Authorization: Super Admin, Managers, and regular Users can add users
     const requesterRole = req.user?.role || 'User';
-    const isManagerOrAdmin = ['Super Admin', 'Manager', 'Executive', 'Administrator'].includes(requesterRole);
+    const isSuperAdmin = requesterRole === 'Super Admin';
+    const isManager = ['Manager', 'Executive', 'Administrator'].includes(requesterRole);
 
-    if (!isManagerOrAdmin) {
-      return res.status(403).json({
-        success: false,
-        message: 'You are not authorized to add employees. Only Managers and Administrators can add employees.',
-      });
-    }
-
-    // Role resolution
+    // Role resolution: Super Admin can set any role, Manager can set Manager/User, regular User can ONLY set User
     let targetRole = 'User';
-    if (requesterRole === 'Super Admin') {
+    if (isSuperAdmin) {
       targetRole = role || 'User';
-    } else if (['Manager', 'Executive', 'Administrator'].includes(requesterRole)) {
+    } else if (isManager) {
       targetRole = role === 'Manager' ? 'Manager' : 'User';
     } else {
       targetRole = 'User';
@@ -265,13 +259,30 @@ router.post('/', protect, async (req, res) => {
     let finalReportsTo = reportsTo || null;
     let finalReportsToName = reportsToName || '';
 
-    if (!finalReportsTo) {
-      if (['Manager', 'Executive', 'Administrator'].includes(requesterRole)) {
-        finalReportsTo = req.user._id ? req.user._id.toString() : req.user.id;
+    if (requesterRole === 'User') {
+      // Regular user always assigns the new user to report to themselves
+      finalReportsTo = req.user._id ? req.user._id.toString() : (req.user.id ? req.user.id.toString() : '');
+      finalReportsToName = `${req.user.name} (User)`;
+    } else if (isManager) {
+      if (reportsTo) {
+        const allUsers = fallbackStore.isFallback
+          ? fallbackStore.users
+          : await User.find({}).select('_id name username role reportsTo reportsToName createdBy').lean();
+        const scopedIds = getScopedUserIds(req.user, allUsers);
+        if (scopedIds && !scopedIds.has(reportsTo.toString())) {
+          return res.status(403).json({
+            success: false,
+            message: 'Managers can only assign users to report to themselves or subordinates within their team branch.',
+          });
+        }
+        const targetParent = allUsers.find((u) => u._id && u._id.toString() === reportsTo.toString());
+        if (targetParent) {
+          finalReportsTo = targetParent._id.toString();
+          finalReportsToName = `${targetParent.name} (${targetParent.role || 'User'})`;
+        }
+      } else {
+        finalReportsTo = req.user._id ? req.user._id.toString() : (req.user.id ? req.user.id.toString() : '');
         finalReportsToName = `${req.user.name} (${req.user.role || 'Manager'})`;
-      } else if (requesterRole === 'User') {
-        finalReportsTo = req.user.reportsTo || (req.user._id ? req.user._id.toString() : req.user.id);
-        finalReportsToName = req.user.reportsToName || `${req.user.name} (User)`;
       }
     }
 
@@ -320,7 +331,7 @@ router.post('/', protect, async (req, res) => {
 
       return res.status(201).json({
         success: true,
-        message: 'Employee created successfully',
+        message: 'User created successfully',
         user: returnedUser,
       });
     } else {
@@ -383,7 +394,7 @@ router.post('/', protect, async (req, res) => {
 
       return res.status(201).json({
         success: true,
-        message: 'Employee created successfully',
+        message: 'User created successfully',
         user: returnedUser,
       });
     }
@@ -469,6 +480,7 @@ router.put('/:id', protect, async (req, res) => {
     const isSelf = currentUserId === id.toString();
     const isSuperAdmin = req.user.role === 'Super Admin';
     const isManager = ['Manager', 'Executive', 'Administrator'].includes(req.user.role);
+    const isManagerOrAdmin = isSuperAdmin || isManager;
 
     // Check if target user was created by or reports to requester
     let isSubordinateOrCreator = false;
@@ -493,7 +505,7 @@ router.put('/:id', protect, async (req, res) => {
     if (!isSelf && !isSuperAdmin && !isManager && !isSubordinateOrCreator) {
       return res.status(403).json({
         success: false,
-        message: 'You are not authorized to edit this employee record.',
+        message: 'You are not authorized to edit this user record.',
       });
     }
 
@@ -734,7 +746,7 @@ router.delete('/:id', protect, async (req, res) => {
     if (!isSuperAdmin && !isSubordinateOrCreator) {
       return res.status(403).json({
         success: false,
-        message: 'You are not authorized to delete this employee record.',
+        message: 'You are not authorized to delete this user record.',
       });
     }
 
