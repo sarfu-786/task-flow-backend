@@ -260,7 +260,7 @@ router.post('/', protect, async (req, res) => {
     let finalReportsToName = reportsToName || '';
 
     if (requesterRole === 'User') {
-      // Regular user always assigns the new user to report to themselves
+      // Regular user always assigns the new user to report directly to themselves
       finalReportsTo = req.user._id ? req.user._id.toString() : (req.user.id ? req.user.id.toString() : '');
       finalReportsToName = `${req.user.name} (User)`;
     } else if (isManager) {
@@ -283,6 +283,20 @@ router.post('/', protect, async (req, res) => {
       } else {
         finalReportsTo = req.user._id ? req.user._id.toString() : (req.user.id ? req.user.id.toString() : '');
         finalReportsToName = `${req.user.name} (${req.user.role || 'Manager'})`;
+      }
+    } else if (isSuperAdmin) {
+      if (reportsTo) {
+        const allUsers = fallbackStore.isFallback
+          ? fallbackStore.users
+          : await User.find({}).select('_id name username role reportsTo reportsToName createdBy').lean();
+        const targetParent = allUsers.find((u) => u._id && u._id.toString() === reportsTo.toString());
+        if (targetParent) {
+          finalReportsTo = targetParent._id.toString();
+          finalReportsToName = `${targetParent.name} (${targetParent.role || 'User'})`;
+        }
+      } else {
+        finalReportsTo = null;
+        finalReportsToName = '';
       }
     }
 

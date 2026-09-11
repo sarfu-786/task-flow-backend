@@ -1,5 +1,24 @@
 {
   "users": [
+
+    {
+      "_id": "64e8a1f60b06e200000000",
+      "name": "rishu",
+      "email": "rishu@gmail.com",
+      "username": "rishu",
+      "password": "$2a$10$Hf0FoxNMRpdPm7ATrhmppen80rwD8Ejqm2Xyf1R398g.BwvFbPinG",
+      "role": "User",
+      "department": "Sells",
+      "avatar": "",
+      "reportsTo": "64e8a135ef265800000000",
+      "reportsToName": "Harsh (User)",
+      "createdBy": "64e8a135ef265800000000",
+      "nodeId": "",
+      "nodeType": "",
+      "reportsToNode": "",
+      "status": "Approved",
+      "createdAt": "2026-09-11T12:28:18.498Z"
+    },
     {
       "_id": "64e8a1f2b6288100000000",
       "name": "aman",
@@ -509,5 +528,5 @@
       "createdAt": "2026-09-09T15:07:18.563Z"
     }
   ],
-  "savedAt": "2026-09-09T15:08:15.782Z"
+  "savedAt": "2026-09-11T12:45:31.212Z"
 }

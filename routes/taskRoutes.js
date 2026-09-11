@@ -166,9 +166,10 @@ const createUserAssignmentNotification = async (task, targetAssignedTo, targetUs
  * Validates organizational hierarchy task assignment rules:
  * 1. Super Admin can assign tasks to any junior user or manager across the organization.
  * 2. Managers can ONLY assign tasks to their junior team members (direct/indirect subordinates).
- * 3. Nobody can assign tasks to seniors (e.g. Manager cannot assign to Super Admin).
- * 4. Nobody can assign tasks to themselves.
- * 5. Regular users cannot assign tasks to others.
+ * 3. Regular Users can assign tasks to junior team members who report directly or indirectly to them.
+ * 4. Nobody can assign tasks to seniors (e.g. User cannot assign to Manager/Super Admin, Manager cannot assign to Super Admin).
+ * 5. Nobody can assign tasks to themselves.
+ * 6. Users cannot assign tasks to peers who do not report to them.
  */
 const validateHierarchyAssignment = async (assignerUser, targetAssignedTo) => {
   if (!assignerUser || !targetAssignedTo) return { valid: true };
@@ -246,9 +247,11 @@ const validateHierarchyAssignment = async (assignerUser, targetAssignedTo) => {
 
     const targetReportsTo = targetUser.reportsTo ? (targetUser.reportsTo._id || targetUser.reportsTo).toString() : '';
     const targetReportsToName = (targetUser.reportsToName || '').toLowerCase().trim();
+    const targetCreatedBy = targetUser.createdBy ? (targetUser.createdBy._id || targetUser.createdBy).toString() : '';
 
     const isDirectJunior =
       (targetReportsTo && targetReportsTo === assignerId) ||
+      (targetCreatedBy && targetCreatedBy === assignerId) ||
       (targetReportsToName && (targetReportsToName.includes(assignerName) || assignerName.includes(targetReportsToName)));
 
     if (!isDirectJunior) {
@@ -261,12 +264,33 @@ const validateHierarchyAssignment = async (assignerUser, targetAssignedTo) => {
     return { valid: true, targetUser };
   }
 
-  // 4. Regular users cannot assign tasks to others
-  return {
-    valid: false,
-    message: 'Hierarchy Constraint: Users cannot assign tasks to seniors or other team members. Tasks are assigned by your reporting manager or Super Admin.',
-    targetUser,
-  };
+  // 4. Regular User: Can assign tasks to junior team members reporting directly to them
+  if (targetRole === 'Super Admin' || targetRole === 'Manager' || targetRole === 'Executive' || targetRole === 'Administrator') {
+    return {
+      valid: false,
+      message: `Hierarchy Constraint: Users cannot assign tasks to senior managers (${targetUser.name}). You can only assign tasks to team members who report directly to you.`,
+      targetUser,
+    };
+  }
+
+  const targetReportsTo = targetUser.reportsTo ? (targetUser.reportsTo._id || targetUser.reportsTo).toString() : '';
+  const targetReportsToName = (targetUser.reportsToName || '').toLowerCase().trim();
+  const targetCreatedBy = targetUser.createdBy ? (targetUser.createdBy._id || targetUser.createdBy).toString() : '';
+
+  const isDirectJunior =
+    (targetReportsTo && targetReportsTo === assignerId) ||
+    (targetCreatedBy && targetCreatedBy === assignerId) ||
+    (targetReportsToName && (targetReportsToName.includes(assignerName) || assignerName.includes(targetReportsToName)));
+
+  if (!isDirectJunior) {
+    return {
+      valid: false,
+      message: `Hierarchy Constraint: You can only assign tasks to users who report directly to you in your team hierarchy. ('${targetUser.name}' does not report to you)`,
+      targetUser,
+    };
+  }
+
+  return { valid: true, targetUser };
 };
 
 // @route   GET /api/tasks
@@ -281,33 +305,59 @@ router.get('/', protect, async (req, res) => {
 
       const isSuperAdmin = req.user && req.user.role === 'Super Admin';
       const isManager = req.user && ['Super Admin', 'Manager', 'Executive', 'Administrator'].includes(req.user.role);
-      
-      if (!isManager || myTasksOnly === 'true') {
-        const userName = req.user.name ? req.user.name.toLowerCase() : '';
-        const userUsername = req.user.username ? req.user.username.toLowerCase() : '';
-        const userId = req.user._id ? req.user._id.toString() : '';
+      const currentUserId = req.user._id ? req.user._id.toString() : '';
+      const currentUserName = (req.user.name || '').toLowerCase();
+      const currentUserUsername = (req.user.username || '').toLowerCase();
 
-        filtered = filtered.filter((t) => {
-          const tAssigned = (t.assignedTo || '').toLowerCase();
-          const tUser = t.user ? t.user.toString() : '';
-          return tAssigned === userName || tAssigned === userUsername || tUser === userId;
-        });
-      } else if (teamOnly === 'true' && !isSuperAdmin) {
-        // Manager's team tasks: tasks assigned to the manager or any user reporting to this manager
-        const managerId = req.user._id ? req.user._id.toString() : '';
-        const managerName = (req.user.name || '').toLowerCase();
-        const subordinateNames = fallbackStore.users
-          .filter(u => 
-            (u.reportsTo && u.reportsTo.toString() === managerId) ||
-            (u.reportsToName && u.reportsToName.toLowerCase().includes(managerName))
-          )
-          .map(u => (u.name || '').toLowerCase());
-        
-        const validAssignees = [managerName, (req.user.username || '').toLowerCase(), ...subordinateNames];
-        filtered = filtered.filter((t) => {
-          const tAssigned = (t.assignedTo || '').toLowerCase();
-          return validAssignees.includes(tAssigned);
-        });
+      // Find all direct and indirect subordinates for current user
+      const subordinateUsers = fallbackStore.users.filter(u => {
+        if (!u || !u._id) return false;
+        if (u._id.toString() === currentUserId) return false;
+        const repId = u.reportsTo ? u.reportsTo.toString() : '';
+        const repName = (u.reportsToName || '').toLowerCase();
+        const createdBy = u.createdBy ? u.createdBy.toString() : '';
+        return repId === currentUserId || createdBy === currentUserId || (currentUserName && repName.includes(currentUserName));
+      });
+      const subordinateNames = subordinateUsers.map(u => (u.name || '').toLowerCase());
+      const subordinateUsernames = subordinateUsers.map(u => (u.username || '').toLowerCase());
+      const subordinateIds = subordinateUsers.map(u => u._id.toString());
+      
+      if (!isSuperAdmin) {
+        if (teamOnly === 'true') {
+          // Team tasks: tasks assigned to user or any user reporting to this user
+          const validAssignees = [currentUserName, currentUserUsername, ...subordinateNames, ...subordinateUsernames];
+          filtered = filtered.filter((t) => {
+            const tAssigned = (t.assignedTo || '').toLowerCase();
+            const tUser = t.user ? t.user.toString() : '';
+            return validAssignees.includes(tAssigned) || subordinateIds.includes(tUser);
+          });
+        } else if (myTasksOnly === 'true') {
+          // Include own tasks AND tasks assigned by this user or tasks assigned to subordinates
+          filtered = filtered.filter((t) => {
+            const tAssigned = (t.assignedTo || '').toLowerCase();
+            const tUser = t.user ? t.user.toString() : '';
+            const tAssignedBy = (t.assignedBy || '').toLowerCase();
+            const isAssignedToMe = tAssigned === currentUserName || tAssigned === currentUserUsername || tUser === currentUserId;
+            const isAssignedToMySubordinate = subordinateNames.includes(tAssigned) || subordinateUsernames.includes(tAssigned) || subordinateIds.includes(tUser);
+            const isAssignedByMe = tAssignedBy.includes(currentUserName) || (currentUserUsername && tAssignedBy.includes(currentUserUsername));
+            return isAssignedToMe || isAssignedToMySubordinate || isAssignedByMe;
+          });
+        } else if (assignedTo && assignedTo !== 'all') {
+          filtered = filtered.filter(
+            (t) => t.assignedTo && t.assignedTo.toLowerCase() === assignedTo.toLowerCase()
+          );
+        } else {
+          // Default user view: include own tasks, subordinates' tasks, and tasks assigned by user
+          filtered = filtered.filter((t) => {
+            const tAssigned = (t.assignedTo || '').toLowerCase();
+            const tUser = t.user ? t.user.toString() : '';
+            const tAssignedBy = (t.assignedBy || '').toLowerCase();
+            const isAssignedToMe = tAssigned === currentUserName || tAssigned === currentUserUsername || tUser === currentUserId;
+            const isAssignedToMySubordinate = subordinateNames.includes(tAssigned) || subordinateUsernames.includes(tAssigned) || subordinateIds.includes(tUser);
+            const isAssignedByMe = tAssignedBy.includes(currentUserName) || (currentUserUsername && tAssignedBy.includes(currentUserUsername));
+            return isAssignedToMe || isAssignedToMySubordinate || isAssignedByMe;
+          });
+        }
       } else if (assignedTo && assignedTo !== 'all') {
         filtered = filtered.filter(
           (t) => t.assignedTo && t.assignedTo.toLowerCase() === assignedTo.toLowerCase()
@@ -352,32 +402,40 @@ router.get('/', protect, async (req, res) => {
       const isSuperAdmin = req.user && req.user.role === 'Super Admin';
       const isManager = req.user && ['Super Admin', 'Manager', 'Executive', 'Administrator'].includes(req.user.role);
 
-      if (!isManager || myTasksOnly === 'true') {
-        const orConditions = [];
-        if (req.user.name) {
-          orConditions.push({ assignedTo: new RegExp('^' + escapeRegex(req.user.name) + '$', 'i') });
-        }
-        if (req.user.username) {
-          orConditions.push({ assignedTo: new RegExp('^' + escapeRegex(req.user.username) + '$', 'i') });
-        }
-        if (req.user.email) {
-          orConditions.push({ assignedTo: new RegExp('^' + escapeRegex(req.user.email) + '$', 'i') });
-        }
-        if (req.user._id && mongoose.Types.ObjectId.isValid(req.user._id)) {
-          orConditions.push({ user: req.user._id });
-        }
-        queryObj.$or = orConditions.length > 0 ? orConditions : [{ assignedTo: 'none' }];
-      } else if (teamOnly === 'true' && !isSuperAdmin) {
-        const managerId = req.user._id ? req.user._id.toString() : '';
-        const managerName = req.user.name || '';
+      if (!isSuperAdmin) {
+        const userName = req.user.name || '';
+        const userUsername = req.user.username || '';
         const subordinates = await User.find({
           $or: [
             { reportsTo: req.user._id },
-            { reportsToName: new RegExp(escapeRegex(managerName), 'i') },
+            { createdBy: req.user._id },
+            { reportsToName: new RegExp(escapeRegex(userName), 'i') },
           ]
-        }).select('name username');
-        const names = [managerName, req.user.username, ...subordinates.map(s => s.name), ...subordinates.map(s => s.username)].filter(Boolean);
-        queryObj.assignedTo = { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) };
+        }).select('_id name username');
+
+        const subordinateNames = [
+          ...subordinates.map(s => s.name),
+          ...subordinates.map(s => s.username)
+        ].filter(Boolean);
+        const subordinateIds = subordinates.map(s => s._id);
+
+        if (teamOnly === 'true') {
+          const names = [userName, userUsername, ...subordinateNames].filter(Boolean);
+          queryObj.$or = [
+            { assignedTo: { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) } },
+            { user: { $in: [req.user._id, ...subordinateIds] } },
+          ];
+        } else if (myTasksOnly === 'true' || (!isManager && !assignedTo)) {
+          const names = [userName, userUsername, ...subordinateNames].filter(Boolean);
+          const orConditions = [
+            { assignedTo: { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) } },
+            { user: { $in: [req.user._id, ...subordinateIds] } },
+            { assignedBy: new RegExp(escapeRegex(userName), 'i') },
+          ];
+          queryObj.$or = orConditions;
+        } else if (assignedTo && assignedTo !== 'all') {
+          queryObj.assignedTo = new RegExp('^' + escapeRegex(assignedTo.trim()) + '$', 'i');
+        }
       } else if (assignedTo && assignedTo !== 'all') {
         queryObj.assignedTo = new RegExp('^' + escapeRegex(assignedTo.trim()) + '$', 'i');
       }
