@@ -13,7 +13,8 @@ const VALID_STATUSES = ['To Do', 'In Progress', 'Completed'];
 // Safe regex character escaper
 const escapeRegex = (str) => (str ? str.toString().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '');
 
-// Helper to create Manager Notification when a task is completed or remarked
+// Helper to create Notification when a task is completed or remarked
+// The completion report is dispatched directly to the assigner who assigned the task
 const createManagerNotification = async (task, user, completionRemark = '', io = null) => {
   try {
     const userName = user?.name || task.assignedTo || 'Team Member';
@@ -22,18 +23,43 @@ const createManagerNotification = async (task, user, completionRemark = '', io =
     const shortDesc = taskDesc.length > 55 ? taskDesc.substring(0, 52) + '...' : taskDesc;
     const remarkText = completionRemark || task.completionRemark || task.remark || 'Marked as completed';
 
-    const safeUserId = user && user._id && mongoose.Types.ObjectId.isValid(user._id)
-      ? user._id
-      : (task.user && mongoose.Types.ObjectId.isValid(task.user) ? task.user : undefined);
+    // Find the specific assigner user who assigned this task
+    let allUsers = [];
+    if (fallbackStore.isFallback) {
+      allUsers = fallbackStore.users;
+    } else {
+      allUsers = await User.find({}).select('_id name username email role').lean();
+    }
 
-    const safeTaskId = task && task._id && mongoose.Types.ObjectId.isValid(task._id)
-      ? task._id
+    let assignerUser = null;
+    if (task.assignedById) {
+      assignerUser = allUsers.find(u => u && u._id && u._id.toString() === task.assignedById.toString());
+    }
+    if (!assignerUser && task.assignedBy) {
+      const cleanAssigner = task.assignedBy.replace(/\s*\(.*?\)\s*$/, '').trim().toLowerCase();
+      assignerUser = allUsers.find(u =>
+        (u.name && u.name.trim().toLowerCase() === cleanAssigner) ||
+        (u.username && u.username.trim().toLowerCase() === cleanAssigner) ||
+        (u.email && u.email.trim().toLowerCase() === cleanAssigner)
+      );
+    }
+
+    const safeAssignerId = assignerUser && assignerUser._id ? (assignerUser._id.toString ? assignerUser._id.toString() : assignerUser._id) : undefined;
+    const safeUserId = user && user._id
+      ? (user._id.toString ? user._id.toString() : user._id)
+      : (task.user ? (task.user.toString ? task.user.toString() : task.user) : undefined);
+
+    const safeTaskId = task && task._id
+      ? (task._id.toString ? task._id.toString() : task._id)
       : undefined;
 
     const notifData = {
       user: safeUserId,
+      recipientUser: safeAssignerId,
+      recipientName: assignerUser?.name || task.assignedBy || 'Manager',
       userName: userName,
       userAvatar: userAvatar,
+      assignedBy: task.assignedBy || 'Manager',
       taskId: safeTaskId,
       taskDescription: taskDesc,
       taskType: task.taskType || 'internet work',
@@ -42,7 +68,7 @@ const createManagerNotification = async (task, user, completionRemark = '', io =
       message: `${userName} has completed "${shortDesc}"`,
       remark: remarkText,
       isRead: false,
-      forRole: 'Manager',
+      forRole: assignerUser?.role === 'Manager' ? 'Manager' : (assignerUser ? 'User' : 'Manager'),
       createdAt: new Date(),
     };
 
@@ -60,7 +86,7 @@ const createManagerNotification = async (task, user, completionRemark = '', io =
       createdNotif = await Notification.create(notifData);
     }
 
-    // Instant Real-Time Socket.io dispatch to Managers
+    // Instant Real-Time Socket.io dispatch directly to the assigner & Managers
     if (io) {
       const payload = {
         notification: createdNotif,
@@ -70,13 +96,21 @@ const createManagerNotification = async (task, user, completionRemark = '', io =
         message: `${userName} completed "${shortDesc}"`,
         remark: remarkText,
       };
-      io.to('role:Manager').emit('notification:new', payload);
-      io.to('role:Manager').emit('task:completed', { task, notification: createdNotif });
+
+      if (safeAssignerId) {
+        io.to(`user:${safeAssignerId.toString()}`).emit('notification:new', payload);
+        io.to(`user:${safeAssignerId.toString()}`).emit('task:completed', { task, notification: createdNotif });
+      }
+      if (assignerUser?.name) {
+        const cleanName = assignerUser.name.toLowerCase().trim();
+        io.to(`user:${cleanName}`).emit('notification:new', payload);
+        io.to(`user:${cleanName}`).emit('task:completed', { task, notification: createdNotif });
+      }
       io.emit('tasks:updated', { task, action: 'completed' });
       io.emit('stats:updated');
     }
   } catch (err) {
-    console.error('[Manager Notification Helper Error]', err.message);
+    console.error('[Task Completion Notification Helper Error]', err.message);
   }
 };
 
@@ -88,16 +122,16 @@ const createUserAssignmentNotification = async (task, targetAssignedTo, targetUs
     const shortDesc = taskDesc.length > 55 ? taskDesc.substring(0, 52) + '...' : taskDesc;
     const instructions = task.remark ? `Instructions: ${task.remark}` : 'Please review the task details and start working on it.';
 
-    const safeManagerId = managerUser && managerUser._id && mongoose.Types.ObjectId.isValid(managerUser._id)
-      ? managerUser._id
+    const safeManagerId = managerUser && managerUser._id
+      ? (managerUser._id.toString ? managerUser._id.toString() : managerUser._id)
       : undefined;
 
-    const safeRecipientId = targetUserId && mongoose.Types.ObjectId.isValid(targetUserId)
-      ? targetUserId
+    const safeRecipientId = targetUserId
+      ? (targetUserId.toString ? targetUserId.toString() : targetUserId)
       : undefined;
 
-    const safeTaskId = task && task._id && mongoose.Types.ObjectId.isValid(task._id)
-      ? task._id
+    const safeTaskId = task && task._id
+      ? (task._id.toString ? task._id.toString() : task._id)
       : undefined;
 
     const notifData = {
@@ -153,7 +187,6 @@ const createUserAssignmentNotification = async (task, targetAssignedTo, targetUs
         io.to(`user:${cleanName}`).emit('notification:new', payload);
         io.to(`user:${cleanName}`).emit('task:assigned', { task, notification: createdNotif });
       }
-      io.to('role:Manager').emit('notification:new', payload);
       io.emit('tasks:updated', { task, action: 'created' });
       io.emit('stats:updated');
     }
@@ -163,13 +196,59 @@ const createUserAssignmentNotification = async (task, targetAssignedTo, targetUs
 };
 
 /**
+ * Helper to get all user IDs that are subordinate to (under) the assigner in hierarchy
+ * Performs a BFS traversal down the hierarchy tree (reportsTo / createdBy / reportsToName)
+ */
+const getSubordinateUserIds = (assignerUser, allUsers) => {
+  if (!assignerUser || !allUsers || !Array.isArray(allUsers)) return new Set();
+  const assignerId = (assignerUser._id ? assignerUser._id.toString() : (assignerUser.id ? assignerUser.id.toString() : '')).trim();
+  const assignerName = (assignerUser.name || '').toLowerCase().trim();
+
+  const subordinateIds = new Set();
+  if (!assignerId && !assignerName) return subordinateIds;
+
+  const queue = [assignerId];
+  const processed = new Set([assignerId]);
+
+  while (queue.length > 0) {
+    const currentParentId = queue.shift();
+    const parentUser = allUsers.find((u) => u && u._id && u._id.toString() === currentParentId);
+    const parentName = (parentUser?.name || (currentParentId === assignerId ? assignerName : '')).toLowerCase().trim();
+
+    for (const u of allUsers) {
+      if (!u || !u._id) continue;
+      const uIdStr = u._id.toString();
+      if (uIdStr === assignerId || processed.has(uIdStr)) continue;
+
+      const repIdStr = u.reportsTo ? (u.reportsTo._id ? u.reportsTo._id.toString() : u.reportsTo.toString()) : '';
+      const repNameStr = (u.reportsToName || '').toLowerCase().trim();
+      const createdByStr = u.createdBy ? (u.createdBy._id ? u.createdBy._id.toString() : u.createdBy.toString()) : '';
+
+      const isDirectReport =
+        (currentParentId && repIdStr === currentParentId) ||
+        (parentName && repNameStr && (repNameStr.includes(parentName) || parentName.includes(repNameStr)));
+
+      const isCreatedByParent = currentParentId && createdByStr === currentParentId;
+
+      if (isDirectReport || isCreatedByParent) {
+        subordinateIds.add(uIdStr);
+        processed.add(uIdStr);
+        queue.push(uIdStr);
+      }
+    }
+  }
+
+  return subordinateIds;
+};
+
+/**
  * Validates organizational hierarchy task assignment rules:
- * 1. Super Admin can assign tasks to any junior user or manager across the organization.
- * 2. Managers can ONLY assign tasks to their junior team members (direct/indirect subordinates).
- * 3. Regular Users can assign tasks to junior team members who report directly or indirectly to them.
+ * 1. Super Admin can assign tasks to any user across the organization (all juniors below Super Admin).
+ * 2. Managers can assign tasks to ALL users who are under them in hierarchy (direct & indirect recursive subordinates).
+ * 3. Regular Users can assign tasks to ALL users who are under them in hierarchy (direct & indirect recursive subordinates).
  * 4. Nobody can assign tasks to seniors (e.g. User cannot assign to Manager/Super Admin, Manager cannot assign to Super Admin).
  * 5. Nobody can assign tasks to themselves.
- * 6. Users cannot assign tasks to peers who do not report to them.
+ * 6. Users cannot assign tasks to peers who do not report to them in hierarchy.
  */
 const validateHierarchyAssignment = async (assignerUser, targetAssignedTo) => {
   if (!assignerUser || !targetAssignedTo) return { valid: true };
@@ -183,8 +262,10 @@ const validateHierarchyAssignment = async (assignerUser, targetAssignedTo) => {
   let targetUser = null;
   const cleanTarget = targetAssignedTo.toString().trim().toLowerCase();
 
+  let allUsers = [];
   if (fallbackStore.isFallback) {
-    targetUser = fallbackStore.users.find(
+    allUsers = fallbackStore.users;
+    targetUser = allUsers.find(
       (u) =>
         (u.name && u.name.trim().toLowerCase() === cleanTarget) ||
         (u.username && u.username.trim().toLowerCase() === cleanTarget) ||
@@ -192,18 +273,17 @@ const validateHierarchyAssignment = async (assignerUser, targetAssignedTo) => {
         (u._id && u._id.toString() === targetAssignedTo.toString().trim())
     );
   } else {
+    allUsers = await User.find({}).select('_id name username email role reportsTo reportsToName createdBy').lean();
     if (mongoose.Types.ObjectId.isValid(targetAssignedTo)) {
-      targetUser = await User.findById(targetAssignedTo).lean();
+      targetUser = allUsers.find((u) => u._id && u._id.toString() === targetAssignedTo.toString());
     }
     if (!targetUser) {
-      const escaped = escapeRegex(targetAssignedTo.toString().trim());
-      targetUser = await User.findOne({
-        $or: [
-          { name: new RegExp('^' + escaped + '$', 'i') },
-          { username: new RegExp('^' + escaped + '$', 'i') },
-          { email: cleanTarget },
-        ],
-      }).lean();
+      targetUser = allUsers.find(
+        (u) =>
+          (u.name && u.name.trim().toLowerCase() === cleanTarget) ||
+          (u.username && u.username.trim().toLowerCase() === cleanTarget) ||
+          (u.email && u.email.trim().toLowerCase() === cleanTarget)
+      );
     }
   }
 
@@ -214,80 +294,52 @@ const validateHierarchyAssignment = async (assignerUser, targetAssignedTo) => {
   const targetId = (targetUser._id ? targetUser._id.toString() : (targetUser.id ? targetUser.id.toString() : '')).trim();
   const targetRole = targetUser.role || 'User';
 
-  // 1. Rule: Nobody can assign tasks to themselves ("not himself")
+  // 1. Rule: Anyone can assign tasks to themselves (Super Admin, Manager, User)
   if (assignerId && targetId && assignerId === targetId) {
-    return {
-      valid: false,
-      message: 'Hierarchy Constraint: You cannot assign a task to yourself. Tasks can only be assigned to junior team members.',
-      targetUser,
-    };
+    return { valid: true, targetUser };
   }
 
   // 2. Super Admin: Can assign tasks to everybody in the organization (all juniors below Super Admin)
   if (isSuperAdmin) {
-    if (targetRole === 'Super Admin' && targetId !== assignerId) {
-      return {
-        valid: false,
-        message: 'Hierarchy Constraint: Super Admin cannot assign tasks to peer Super Admins. Tasks can only be assigned to junior users and managers.',
-        targetUser,
-      };
-    }
     return { valid: true, targetUser };
   }
 
-  // 3. Manager: Can ONLY assign tasks to junior team members reporting to them, NOT seniors (Super Admin)
-  if (isManager) {
-    if (targetRole === 'Super Admin') {
-      return {
-        valid: false,
-        message: 'Hierarchy Constraint: Managers cannot assign tasks to seniors (Super Admin). Tasks can only be assigned to your junior subordinates.',
-        targetUser,
-      };
-    }
-
-    const targetReportsTo = targetUser.reportsTo ? (targetUser.reportsTo._id || targetUser.reportsTo).toString() : '';
-    const targetReportsToName = (targetUser.reportsToName || '').toLowerCase().trim();
-    const targetCreatedBy = targetUser.createdBy ? (targetUser.createdBy._id || targetUser.createdBy).toString() : '';
-
-    const isDirectJunior =
-      (targetReportsTo && targetReportsTo === assignerId) ||
-      (targetCreatedBy && targetCreatedBy === assignerId) ||
-      (targetReportsToName && (targetReportsToName.includes(assignerName) || assignerName.includes(targetReportsToName)));
-
-    if (!isDirectJunior) {
-      return {
-        valid: false,
-        message: `Hierarchy Constraint: Managers can only assign tasks to junior team members who report directly to them. ('${targetUser.name}' does not report to you)`,
-        targetUser,
-      };
-    }
-    return { valid: true, targetUser };
-  }
-
-  // 4. Regular User: Can assign tasks to junior team members reporting directly to them
-  if (targetRole === 'Super Admin' || targetRole === 'Manager' || targetRole === 'Executive' || targetRole === 'Administrator') {
+  // 3. Manager & User: Can assign tasks to ALL users who are under them in the hierarchy
+  // Check if target is senior (Super Admin)
+  if (targetRole === 'Super Admin') {
     return {
       valid: false,
-      message: `Hierarchy Constraint: Users cannot assign tasks to senior managers (${targetUser.name}). You can only assign tasks to team members who report directly to you.`,
+      message: `${isManager ? 'Managers' : 'Users'} cannot assign tasks to seniors (Super Admin). Tasks can only be assigned to yourself or your junior subordinates.`,
       targetUser,
     };
   }
 
-  const targetReportsTo = targetUser.reportsTo ? (targetUser.reportsTo._id || targetUser.reportsTo).toString() : '';
-  const targetReportsToName = (targetUser.reportsToName || '').toLowerCase().trim();
-  const targetCreatedBy = targetUser.createdBy ? (targetUser.createdBy._id || targetUser.createdBy).toString() : '';
-
-  const isDirectJunior =
-    (targetReportsTo && targetReportsTo === assignerId) ||
-    (targetCreatedBy && targetCreatedBy === assignerId) ||
-    (targetReportsToName && (targetReportsToName.includes(assignerName) || assignerName.includes(targetReportsToName)));
-
-  if (!isDirectJunior) {
+  // Check if regular user is trying to assign to a Manager
+  if (!isManager && !isSuperAdmin && (targetRole === 'Manager' || targetRole === 'Executive' || targetRole === 'Administrator')) {
     return {
       valid: false,
-      message: `Hierarchy Constraint: You can only assign tasks to users who report directly to you in your team hierarchy. ('${targetUser.name}' does not report to you)`,
+      message: `Users cannot assign tasks to managers. Tasks can only be assigned to yourself or your junior subordinates.`,
       targetUser,
     };
+  }
+
+  const subordinateIds = getSubordinateUserIds(assignerUser, allUsers);
+  const isJuniorInHierarchy = subordinateIds.has(targetId);
+
+  if (!isJuniorInHierarchy) {
+    if (isManager) {
+      return {
+        valid: false,
+        message: `Hierarchy Constraint: Managers can only assign tasks to yourself or users under you in the hierarchy. ('${targetUser.name}' is not in your team hierarchy)`,
+        targetUser,
+      };
+    } else {
+      return {
+        valid: false,
+        message: `Hierarchy Constraint: You can only assign tasks to yourself or users who are under you in your team hierarchy. ('${targetUser.name}' is not in your subordinate hierarchy)`,
+        targetUser,
+      };
+    }
   }
 
   return { valid: true, targetUser };
@@ -310,17 +362,11 @@ router.get('/', protect, async (req, res) => {
       const currentUserUsername = (req.user.username || '').toLowerCase();
 
       // Find all direct and indirect subordinates for current user
-      const subordinateUsers = fallbackStore.users.filter(u => {
-        if (!u || !u._id) return false;
-        if (u._id.toString() === currentUserId) return false;
-        const repId = u.reportsTo ? u.reportsTo.toString() : '';
-        const repName = (u.reportsToName || '').toLowerCase();
-        const createdBy = u.createdBy ? u.createdBy.toString() : '';
-        return repId === currentUserId || createdBy === currentUserId || (currentUserName && repName.includes(currentUserName));
-      });
-      const subordinateNames = subordinateUsers.map(u => (u.name || '').toLowerCase());
-      const subordinateUsernames = subordinateUsers.map(u => (u.username || '').toLowerCase());
-      const subordinateIds = subordinateUsers.map(u => u._id.toString());
+      const subordinateIdsSet = getSubordinateUserIds(req.user, fallbackStore.users);
+      const subordinateUsers = fallbackStore.users.filter((u) => u && u._id && subordinateIdsSet.has(u._id.toString()));
+      const subordinateNames = subordinateUsers.map((u) => (u.name || '').toLowerCase());
+      const subordinateUsernames = subordinateUsers.map((u) => (u.username || '').toLowerCase());
+      const subordinateIds = Array.from(subordinateIdsSet);
       
       if (!isSuperAdmin) {
         if (teamOnly === 'true') {
@@ -405,19 +451,15 @@ router.get('/', protect, async (req, res) => {
       if (!isSuperAdmin) {
         const userName = req.user.name || '';
         const userUsername = req.user.username || '';
-        const subordinates = await User.find({
-          $or: [
-            { reportsTo: req.user._id },
-            { createdBy: req.user._id },
-            { reportsToName: new RegExp(escapeRegex(userName), 'i') },
-          ]
-        }).select('_id name username');
+        const allDbUsers = await User.find({}).select('_id name username reportsTo reportsToName createdBy').lean();
+        const subordinateIdsSet = getSubordinateUserIds(req.user, allDbUsers);
+        const subordinates = allDbUsers.filter((u) => u && u._id && subordinateIdsSet.has(u._id.toString()));
 
         const subordinateNames = [
-          ...subordinates.map(s => s.name),
-          ...subordinates.map(s => s.username)
+          ...subordinates.map((s) => s.name),
+          ...subordinates.map((s) => s.username),
         ].filter(Boolean);
-        const subordinateIds = subordinates.map(s => s._id);
+        const subordinateIds = Array.from(subordinateIdsSet);
 
         if (teamOnly === 'true') {
           const names = [userName, userUsername, ...subordinateNames].filter(Boolean);
@@ -683,6 +725,7 @@ router.post('/', protect, async (req, res) => {
       }
     }
 
+    const assignerIdStr = req.user?._id ? (req.user._id.toString ? req.user._id.toString() : req.user._id) : undefined;
     const newTaskData = {
       taskType: formattedType,
       description: description.trim(),
@@ -693,6 +736,7 @@ router.post('/', protect, async (req, res) => {
       priority: priority || 'Medium',
       assignedTo: targetAssignedTo,
       assignedBy: managerAssignedBy,
+      assignedById: assignerIdStr,
       createdAt: new Date(),
       updatedAt: new Date(),
     };

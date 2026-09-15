@@ -79,6 +79,7 @@ async function testAllEndpoints() {
     description: 'Implement distributed rate limiter using Redis token bucket algorithm',
     expectedDate: '2026-09-20',
     remark: 'Max 100 requests per minute per IP address',
+    assignedTo: 'Wasil',
     status: 'To Do',
   };
   const createRes = await fetch(`${baseUrl}/tasks`, {

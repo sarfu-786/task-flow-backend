@@ -47,6 +47,10 @@ const taskSchema = new mongoose.Schema({
     type: String,
     default: 'Manager (Admin)',
   },
+  assignedById: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+  },
   completionRemark: {
     type: String,
     trim: true,

@@ -89,12 +89,18 @@ const buildHierarchyTree = (users, tasks, targetRootUserId = null) => {
   const childrenMap = new Map();
   users.forEach((u) => {
     let repId = 'ROOT';
-    if (u.reportsTo && (idMap.has(u.reportsTo.toString()) || targetRootUserId)) {
-      repId = u.reportsTo.toString();
+    const rIdStr = u.reportsTo ? (u.reportsTo._id ? u.reportsTo._id.toString() : u.reportsTo.toString()) : '';
+    const rawRName = (u.reportsToName || '').toLowerCase().trim();
+    const cleanRName = rawRName.replace(/\s*\([^)]*\)/g, '').trim();
+
+    if (rIdStr && (idMap.has(rIdStr) || targetRootUserId)) {
+      repId = rIdStr;
+    } else if (cleanRName && userMap.has(cleanRName)) {
+      repId = userMap.get(cleanRName)._id.toString();
+    } else if (rawRName && userMap.has(rawRName)) {
+      repId = userMap.get(rawRName)._id.toString();
     } else if (u.createdBy && idMap.has(u.createdBy.toString())) {
       repId = u.createdBy.toString();
-    } else if (u.reportsTo) {
-      repId = u.reportsTo.toString();
     }
 
     if (!childrenMap.has(repId)) {
@@ -104,13 +110,17 @@ const buildHierarchyTree = (users, tasks, targetRootUserId = null) => {
   });
 
   // Recursive node tree builder
-  const buildNode = (userObj, depth = 1) => {
+  const buildNode = (userObj, depth = 1, visitedSet = new Set()) => {
     const userTaskInfo = getUserTasks(userObj);
     const userIdStr = userObj._id ? userObj._id.toString() : '';
     const rawChildren = childrenMap.get(userIdStr) || [];
 
-    // Recursively build child nodes
-    const children = rawChildren.map((child) => buildNode(child, depth + 1));
+    visitedSet.add(userIdStr);
+
+    // Recursively build child nodes, preventing cycles
+    const children = rawChildren
+      .filter((child) => child && child._id && !visitedSet.has(child._id.toString()))
+      .map((child) => buildNode(child, depth + 1, visitedSet));
 
     // Calculate total team size (direct + indirect subordinates)
     const teamCount = children.reduce((acc, child) => acc + 1 + (child.teamCount || 0), 0);
@@ -164,23 +174,58 @@ const buildHierarchyTree = (users, tasks, targetRootUserId = null) => {
     return null;
   }
 
-  const rootNode = buildNode(rootUser, 1);
+  const visitedNodes = new Set();
+  const rootNode = buildNode(rootUser, 1, visitedNodes);
 
-  // If there are unattached root nodes (e.g. other managers not explicitly assigned under root),
-  // ONLY attach them under root if this is the full organization tree (no targetRootUserId specified)
+  // Helper to collect all node IDs present in the tree
+  const getAllTreeIds = (node) => {
+    const ids = new Set();
+    if (!node || !node._id) return ids;
+    ids.add(node._id.toString());
+    if (Array.isArray(node.children)) {
+      node.children.forEach((child) => {
+        getAllTreeIds(child).forEach((id) => ids.add(id));
+      });
+    }
+    return ids;
+  };
+
+  // If this is the full organization tree (no specific targetRootUserId),
+  // attach any unparented subtree roots under main root so entire branches stay intact
   if (!targetRootUserId) {
-    const rootChildrenIds = new Set(rootNode.children.map((c) => c._id.toString()));
-    const unattachedRoots = users.filter((u) => {
-      const uId = u._id.toString();
-      const isRoot = uId === rootUser._id.toString();
-      const hasParent = u.reportsTo && idMap.has(u.reportsTo.toString());
-      return !isRoot && !hasParent && !rootChildrenIds.has(uId);
+    const allIncludedIds = getAllTreeIds(rootNode);
+    const unattachedUsers = users.filter((u) => {
+      const uId = u._id ? u._id.toString() : '';
+      return uId && !allIncludedIds.has(uId);
     });
 
-    unattachedRoots.forEach((unattached) => {
-      rootNode.children.push(buildNode(unattached, 2));
-      rootNode.teamCount += 1;
+    const unattachedIds = new Set(unattachedUsers.map((u) => (u._id ? u._id.toString() : '')));
+    const subtreeRoots = unattachedUsers.filter((u) => {
+      let parentId = null;
+      const rIdStr = u.reportsTo ? (u.reportsTo._id ? u.reportsTo._id.toString() : u.reportsTo.toString()) : '';
+      const rawRName = (u.reportsToName || '').toLowerCase().trim();
+      const cleanRName = rawRName.replace(/\s*\([^)]*\)/g, '').trim();
+
+      if (rIdStr && idMap.has(rIdStr)) {
+        parentId = rIdStr;
+      } else if (cleanRName && userMap.has(cleanRName)) {
+        parentId = userMap.get(cleanRName)._id.toString();
+      } else if (rawRName && userMap.has(rawRName)) {
+        parentId = userMap.get(rawRName)._id.toString();
+      } else if (u.createdBy && idMap.has(u.createdBy.toString())) {
+        parentId = u.createdBy.toString();
+      }
+
+      return !parentId || !unattachedIds.has(parentId);
     });
+
+    subtreeRoots.forEach((subRoot) => {
+      const childNode = buildNode(subRoot, 2, visitedNodes);
+      rootNode.children.push(childNode);
+    });
+
+    // Recalculate root team count
+    rootNode.teamCount = rootNode.children.reduce((acc, child) => acc + 1 + (child.teamCount || 0), 0);
   }
 
   return rootNode;

@@ -4,6 +4,8 @@ const Notification = require('../models/Notification');
 const { protect } = require('../middleware/auth');
 const { fallbackStore } = require('../config/db');
 
+const escapeRegex = (str) => (str ? str.toString().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '');
+
 // @route   GET /api/notifications
 // @desc    Get notifications for logged-in user (Manager or User)
 // @access  Private
@@ -17,23 +19,24 @@ router.get('/', protect, async (req, res) => {
     if (fallbackStore.isFallback) {
       let list = [...(fallbackStore.notifications || [])];
 
-      if (isManager) {
-        // Manager sees completion alerts and manager messages
-        list = list.filter((n) => n.forRole === 'Manager' || n.forRole === 'All');
-      } else {
-        // Regular user sees assignment notifications sent to them
-        list = list.filter((n) => {
-          if (n.forRole === 'Manager') return false;
-          const rName = (n.recipientName || '').toLowerCase().trim();
-          const rUser = n.recipientUser ? n.recipientUser.toString() : '';
+      list = list.filter((n) => {
+        const rUser = n.recipientUser ? n.recipientUser.toString() : '';
+        const rName = (n.recipientName || '').toLowerCase().trim();
+        const isDirectRecipient =
+          (rUser && rUser === userId) ||
+          (rName && (rName === userName || rName === userUsername || userName.includes(rName) || rName.includes(userName)));
 
-          return (
-            (rUser && rUser === userId) ||
-            (rName && (rName === userName || rName === userUsername || userName.includes(rName) || rName.includes(userName))) ||
-            n.forRole === 'All'
-          );
-        });
-      }
+        // Direct Assigner Rule: Task completion notifications MUST only go to the assigner
+        if (n.type === 'task_completed') {
+          return isDirectRecipient;
+        }
+
+        if (isManager || req.user?.role === 'Super Admin') {
+          return isDirectRecipient || n.forRole === 'Manager' || n.forRole === 'All';
+        } else {
+          return isDirectRecipient || n.forRole === 'All';
+        }
+      });
 
       list.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
       const unreadCount = list.filter((n) => !n.isRead).length;
@@ -46,16 +49,25 @@ router.get('/', protect, async (req, res) => {
       });
     } else {
       let filter = {};
-      if (isManager) {
-        filter = { forRole: { $in: ['Manager', 'All'] } };
-      } else {
+      const regexName = escapeRegex(req.user?.name || '');
+      const regexUsername = escapeRegex(req.user?.username || '');
+
+      if (isManager || req.user?.role === 'Super Admin') {
         filter = {
-          forRole: { $ne: 'Manager' },
           $or: [
             { recipientUser: req.user._id },
-            { recipientName: new RegExp(req.user.name, 'i') },
-            { recipientName: new RegExp(req.user.username, 'i') },
-            { forRole: 'All' },
+            { recipientName: new RegExp(regexName, 'i') },
+            { recipientName: new RegExp(regexUsername, 'i') },
+            { forRole: { $in: ['Manager', 'All'] }, type: { $ne: 'task_completed' } },
+          ],
+        };
+      } else {
+        filter = {
+          $or: [
+            { recipientUser: req.user._id },
+            { recipientName: new RegExp(regexName, 'i') },
+            { recipientName: new RegExp(regexUsername, 'i') },
+            { forRole: 'All', type: { $ne: 'task_completed' } },
           ],
         };
       }

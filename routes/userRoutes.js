@@ -229,12 +229,10 @@ router.post('/', protect, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Email address is required' });
     }
 
-    if (!username || !username.trim()) {
-      return res.status(400).json({ success: false, message: 'Username is required' });
-    }
-
     const cleanEmail = email.trim().toLowerCase();
-    const cleanUsername = username.trim().toLowerCase();
+    const cleanUsername = username && username.trim()
+      ? username.trim().toLowerCase()
+      : cleanEmail.split('@')[0].replace(/[^a-z0-9._-]/g, '') || name.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
     const userPassword = password && password.trim() ? password.trim() : 'user123';
 
     // Authorization: Super Admin, Managers, and regular Users can add users
@@ -304,13 +302,13 @@ router.post('/', protect, async (req, res) => {
 
     if (fallbackStore.isFallback) {
       const existingUser = fallbackStore.users.find(
-        (u) => u.email.toLowerCase() === cleanEmail || u.username.toLowerCase() === cleanUsername
+        (u) => u.email.toLowerCase() === cleanEmail
       );
 
       if (existingUser) {
         return res.status(400).json({
           success: false,
-          message: 'A user with this email or username already exists',
+          message: 'An account with this email address already exists.',
         });
       }
 
@@ -349,14 +347,12 @@ router.post('/', protect, async (req, res) => {
         user: returnedUser,
       });
     } else {
-      const existingUser = await User.findOne({
-        $or: [{ email: cleanEmail }, { username: cleanUsername }],
-      });
+      const existingUser = await User.findOne({ email: cleanEmail });
 
       if (existingUser) {
         return res.status(400).json({
           success: false,
-          message: 'A user with this email or username already exists',
+          message: 'An account with this email address already exists.',
         });
       }
 
@@ -549,13 +545,7 @@ router.put('/:id', protect, async (req, res) => {
       }
     }
 
-    let cleanUsername = username !== undefined ? username.trim().toLowerCase() : undefined;
-    if (cleanUsername !== undefined && !cleanUsername) {
-      return res.status(400).json({
-        success: false,
-        message: 'Username cannot be empty',
-      });
-    }
+    let cleanUsername = username !== undefined && username !== null ? username.trim().toLowerCase() : undefined;
 
     if (targetPassword !== null && targetPassword.length < 4) {
       return res.status(400).json({
@@ -579,19 +569,6 @@ router.put('/:id', protect, async (req, res) => {
           return res.status(400).json({
             success: false,
             message: 'An account with this email address already exists. Please choose a different email.',
-          });
-        }
-      }
-
-      // Check username uniqueness if username changed
-      if (cleanUsername && cleanUsername !== (fallbackStore.users[userIndex].username || '').toLowerCase()) {
-        const usernameConflict = fallbackStore.users.find(
-          (u, idx) => idx !== userIndex && u.username && u.username.toLowerCase() === cleanUsername
-        );
-        if (usernameConflict) {
-          return res.status(400).json({
-            success: false,
-            message: 'This username is already taken. Please choose another username.',
           });
         }
       }
