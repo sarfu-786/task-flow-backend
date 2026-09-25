@@ -212,7 +212,7 @@
       "name": "Sarfaraj Ahmad",
       "email": "sarfrajahamad068@gmail.com",
       "username": "sarfraj",
-      "password": "$2a$10$nObdMopN9v1NNDcGLKVEFusu8kXHibY6Cfh6nwJaNBJFAwUTvmAPC",
+      "password": "$2a$10$0ZlhZUmkgvKNqxBroZOL8eXFXVN102E/yCCVdNahw8tBKnbytCtYC",
       "role": "Super Admin",
       "department": "Executive Leadership",
       "avatar": "",
@@ -1548,5 +1548,5 @@
     "renewalDate": "2027-09-16T09:22:46.923Z",
     "updatedAt": "2026-09-16T09:22:46.924Z"
   },
-  "savedAt": "2026-09-25T10:01:25.922Z"
+  "savedAt": "2026-09-25T10:12:06.223Z"
 }
