@@ -19,6 +19,20 @@ const fallbackStore = {
   users: [],
   tasks: [],
   notifications: [],
+  leads: [],
+  opportunities: [],
+  complaints: [],
+  projects: [],
+  subscription: {
+    organizationName: 'TaskFlow Enterprise Client',
+    activeModules: ['leads', 'complaints', 'projects'],
+    userSeats: 12,
+    currency: 'USD',
+    billingCycle: 'Annual',
+    status: 'Active',
+    renewalDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
   _isFallback: true,
   dbError: null,
 
@@ -38,6 +52,16 @@ const fallbackStore = {
         users: this.users,
         tasks: this.tasks,
         notifications: this.notifications,
+        leads: this.leads || [],
+        opportunities: this.opportunities || [],
+        complaints: this.complaints || [],
+        projects: this.projects || [],
+        subscription: this.subscription || {
+          organizationName: 'TaskFlow Enterprise Client',
+          activeModules: ['leads', 'complaints', 'projects'],
+          userSeats: 12,
+          currency: 'USD',
+        },
         savedAt: new Date().toISOString(),
       };
       fs.writeFileSync(DATA_FILE, JSON.stringify(payload, null, 2), 'utf-8');
@@ -55,6 +79,13 @@ const fallbackStore = {
           this.users = parsed.users;
           this.tasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
           this.notifications = Array.isArray(parsed.notifications) ? parsed.notifications : [];
+          this.leads = Array.isArray(parsed.leads) ? parsed.leads : [];
+          this.opportunities = Array.isArray(parsed.opportunities) ? parsed.opportunities : [];
+          this.complaints = Array.isArray(parsed.complaints) ? parsed.complaints : [];
+          this.projects = Array.isArray(parsed.projects) ? parsed.projects : [];
+          if (parsed.subscription && typeof parsed.subscription === 'object') {
+            this.subscription = parsed.subscription;
+          }
           return true;
         }
       }
@@ -64,7 +95,7 @@ const fallbackStore = {
     return false;
   },
 
-  async syncWithMongoDB(User, Task, Notification) {
+  async syncWithMongoDB(User, Task, Notification, Lead, Opportunity, Complaint, Project, SubscriptionModel) {
     try {
       if (!User || !Task) return;
 
@@ -75,13 +106,13 @@ const fallbackStore = {
         // Ensure Sarfaraj is Super Admin
         await User.updateMany(
           { $or: [{ email: 'sarfrajahamad068@gmail.com' }, { username: 'sarfraj' }] },
-          { $set: { role: 'Super Admin' } }
+          { $set: { role: 'Super Admin', roles: ['Super Admin'] } }
         );
       } catch (migErr) {
         console.warn('[Database Migration Notice]', migErr.message);
       }
 
-      // 1. Sync Users: Transfer local store users into MongoDB if missing
+      // 1. Sync Users
       const dbUsers = await User.find({}).select('+password');
       const dbUserEmails = new Set(dbUsers.map(u => (u.email || '').toLowerCase()));
       const dbUserUsernames = new Set(dbUsers.map(u => (u.username || '').toLowerCase()));
@@ -92,12 +123,17 @@ const fallbackStore = {
 
         if (emailLower && !dbUserEmails.has(emailLower) && (!usernameLower || !dbUserUsernames.has(usernameLower))) {
           try {
+            const userRoles = Array.isArray(localUser.roles) && localUser.roles.length > 0
+              ? localUser.roles
+              : [localUser.role || 'User'];
+
             const newUser = new User({
               name: localUser.name,
               email: localUser.email,
               username: localUser.username,
               password: localUser.password || 'user123',
-              role: localUser.role || 'User',
+              role: localUser.role || userRoles[0] || 'User',
+              roles: userRoles,
               department: localUser.department || 'Operations',
               avatar: localUser.avatar || '',
               reportsTo: localUser.reportsTo || null,
@@ -109,7 +145,7 @@ const fallbackStore = {
               status: localUser.status || 'Approved',
               createdAt: localUser.createdAt ? new Date(localUser.createdAt) : new Date(),
             });
-            // If password was already hashed in localStore, assign directly without double-hashing
+
             if (localUser.password && localUser.password.startsWith('$2')) {
               newUser.password = localUser.password;
               await User.collection.insertOne(newUser.toObject());
@@ -117,14 +153,13 @@ const fallbackStore = {
               await newUser.save();
             }
             dbUserEmails.add(emailLower);
-            console.log(`[Database Sync] Migrated user "${localUser.name}" (${localUser.email}) to MongoDB.`);
           } catch (e) {
             console.warn(`[Database Sync] User migrate notice for ${localUser.email}:`, e.message);
           }
         }
       }
 
-      // Re-fetch all users from MongoDB and update local store
+      // Re-fetch all users from MongoDB
       const updatedDbUsers = await User.find({}).select('+password');
       this.users = updatedDbUsers.map(u => ({
         _id: u._id.toString(),
@@ -133,6 +168,7 @@ const fallbackStore = {
         username: u.username,
         password: u.password,
         role: u.role,
+        roles: Array.isArray(u.roles) && u.roles.length > 0 ? u.roles : [u.role || 'User'],
         department: u.department,
         avatar: u.avatar || '',
         reportsTo: u.reportsTo || null,
@@ -145,57 +181,50 @@ const fallbackStore = {
         createdAt: u.createdAt,
       }));
 
-      // 2. Sync Tasks: Transfer local tasks into MongoDB if missing
-      const dbTasks = await Task.find({});
-      const dbTaskIds = new Set(dbTasks.map(t => t._id.toString()));
+      // 2. Sync Tasks
+      const dbTasks = await Task.find({}).sort({ createdAt: -1 });
+      this.tasks = dbTasks.map(t => t.toObject());
 
-      for (const localTask of this.tasks) {
-        if (localTask._id && !dbTaskIds.has(localTask._id.toString())) {
-          try {
-            // Find corresponding user in MongoDB
-            let targetUserId = undefined;
-            if (localTask.assignedTo) {
-              const matched = updatedDbUsers.find(
-                u => (u.name && u.name.toLowerCase() === localTask.assignedTo.toLowerCase()) ||
-                     (u.username && u.username.toLowerCase() === localTask.assignedTo.toLowerCase())
-              );
-              if (matched) targetUserId = matched._id;
-            }
-
-            await Task.create({
-              taskType: localTask.taskType || 'internet work',
-              description: localTask.description,
-              expectedDate: localTask.expectedDate ? new Date(localTask.expectedDate) : new Date(),
-              remark: localTask.remark || '',
-              completionRemark: localTask.completionRemark || '',
-              status: localTask.status || 'To Do',
-              priority: localTask.priority || 'Medium',
-              assignedTo: localTask.assignedTo || 'Team Member',
-              assignedBy: localTask.assignedBy || 'Manager',
-              user: targetUserId,
-              completedAt: localTask.completedAt ? new Date(localTask.completedAt) : null,
-              createdAt: localTask.createdAt ? new Date(localTask.createdAt) : new Date(),
-            });
-            console.log(`[Database Sync] Migrated task "${localTask.description?.substring(0, 30)}..." to MongoDB.`);
-          } catch (e) {
-            console.warn(`[Database Sync] Task migrate notice:`, e.message);
-          }
-        }
-      }
-
-      // Re-fetch all tasks from MongoDB and update local store
-      const updatedDbTasks = await Task.find({}).sort({ createdAt: -1 });
-      this.tasks = updatedDbTasks.map(t => t.toObject());
-
-      // 3. Sync Notifications if Notification model provided
+      // 3. Sync Notifications
       if (Notification) {
         const dbNotifs = await Notification.find({}).sort({ createdAt: -1 });
         this.notifications = dbNotifs.map(n => n.toObject());
       }
 
-      // Save complete snapshot to local disk
+      // 4. Sync Leads
+      if (Lead) {
+        const dbLeads = await Lead.find({}).sort({ createdAt: -1 });
+        this.leads = dbLeads.map(l => l.toObject());
+      }
+
+      // 5. Sync Complaints
+      if (Complaint) {
+        const dbComplaints = await Complaint.find({}).sort({ createdAt: -1 });
+        this.complaints = dbComplaints.map(c => c.toObject());
+      }
+
+      // 6. Sync Projects
+      if (Project) {
+        const dbProjects = await Project.find({}).sort({ createdAt: -1 });
+        this.projects = dbProjects.map(p => p.toObject());
+      }
+
+      // 7. Sync Subscription
+      if (SubscriptionModel) {
+        let dbSub = await SubscriptionModel.findOne({});
+        if (!dbSub) {
+          dbSub = await SubscriptionModel.create({
+            organizationName: this.subscription?.organizationName || 'TaskFlow Enterprise Client',
+            activeModules: this.subscription?.activeModules || ['leads', 'complaints', 'projects'],
+            userSeats: this.subscription?.userSeats || 12,
+            currency: this.subscription?.currency || 'USD',
+          });
+        }
+        this.subscription = dbSub.toObject();
+      }
+
       this.saveToFile();
-      console.log(`[Database Sync] Successfully synchronized ${this.users.length} users and ${this.tasks.length} tasks.`);
+      console.log(`[Database Sync] Synced ${this.users.length} users, ${this.tasks.length} tasks, ${(this.leads || []).length} leads, ${(this.complaints || []).length} complaints, ${(this.projects || []).length} projects.`);
     } catch (syncErr) {
       console.error('[Database Sync Error]', syncErr.message);
     }
@@ -208,7 +237,6 @@ fallbackStore.loadFromFile();
 const connectDB = async () => {
   let mongoURI = process.env.MONGODB_URI;
 
-  // If MONGODB_URI is not provided or points to local address on remote/cloud host
   if (!mongoURI || mongoURI.includes('127.0.0.1') || mongoURI.includes('localhost') || !mongoURI.includes('mongodb+srv')) {
     mongoURI = 'mongodb+srv://sarfrajahamad068_db_user:NTAPWfhRqpTYZumh@cluster0.p31lill.mongodb.net/taskflow_db?retryWrites=true&w=majority&appName=Cluster0';
   } else if (mongoURI.includes('mongodb+srv://') && !mongoURI.includes('.mongodb.net/')) {
@@ -218,8 +246,7 @@ const connectDB = async () => {
   try {
     mongoose.set('strictQuery', false);
     console.log(`[Database] Attempting connection to MongoDB Atlas...`);
-    
-    // Connection event listeners
+
     mongoose.connection.on('connected', () => {
       console.log(`[MongoDB Event] Connected to database: ${mongoose.connection.name}`);
       fallbackStore._isFallback = false;
@@ -240,7 +267,7 @@ const connectDB = async () => {
     await mongoose.connect(mongoURI, {
       serverSelectionTimeoutMS: 2500,
       socketTimeoutMS: 10000,
-      family: 4, // Force IPv4 to prevent Windows DNS IPv6 resolution failure (ENOTFOUND)
+      family: 4,
       maxPoolSize: 10,
     });
 
@@ -250,7 +277,7 @@ const connectDB = async () => {
     return { isFallback: false };
   } catch (error) {
     console.warn(`[Database Notice] MongoDB Atlas connection unavailable:`, error.message);
-    console.log(`[Database] Instantly operating on persistent file-backed local database store.`);
+    console.log(`[Database] Operating on persistent file-backed local database store.`);
     fallbackStore._isFallback = true;
     fallbackStore.dbError = error.message;
     fallbackStore.loadFromFile();

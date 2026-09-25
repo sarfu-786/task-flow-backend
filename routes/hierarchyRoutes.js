@@ -70,6 +70,7 @@ const buildHierarchyTree = (users, tasks, targetRootUserId = null) => {
         _id: current._id,
         name: current.name,
         role: current.role,
+        roles: Array.isArray(current.roles) && current.roles.length > 0 ? current.roles : [current.role || 'User'],
         department: current.department,
         email: current.email,
         avatar: current.avatar || '',
@@ -114,6 +115,9 @@ const buildHierarchyTree = (users, tasks, targetRootUserId = null) => {
     const userTaskInfo = getUserTasks(userObj);
     const userIdStr = userObj._id ? userObj._id.toString() : '';
     const rawChildren = childrenMap.get(userIdStr) || [];
+    const userRoles = Array.isArray(userObj.roles) && userObj.roles.length > 0
+      ? userObj.roles
+      : [userObj.role || 'User'];
 
     visitedSet.add(userIdStr);
 
@@ -130,7 +134,8 @@ const buildHierarchyTree = (users, tasks, targetRootUserId = null) => {
       name: userObj.name,
       email: userObj.email,
       username: userObj.username,
-      role: userObj.role || 'User',
+      role: userObj.role || userRoles[0] || 'User',
+      roles: userRoles,
       department: userObj.department || 'Operations',
       avatar: userObj.avatar || '',
       status: userObj.status || 'Approved',
@@ -252,23 +257,132 @@ router.get('/', protect, async (req, res) => {
     }
 
     const isSuperAdmin = req.user && req.user.role === 'Super Admin';
+    const currentUserIdStr = req.user?._id ? req.user._id.toString() : (req.user?.id ? req.user.id.toString() : '');
     let targetRootId = null;
 
     if (!isSuperAdmin) {
-      // Non-Super Admin (Managers / Staff) can ONLY view their own subtree
-      targetRootId = req.user?._id ? req.user._id.toString() : req.user?.id;
+      // Non-Super Admin (Managers / Staff) can view their subtree as root
+      targetRootId = currentUserIdStr;
     } else if (managerId) {
       targetRootId = managerId;
     }
 
     const tree = buildHierarchyTree(allUsers, allTasks, targetRootId);
 
+    // Compute upward reporting chain from current logged-in user up to Super Admin
+    const currentUserObj = allUsers.find(
+      (u) => (u._id && u._id.toString() === currentUserIdStr) || (u.email && u.email.toLowerCase() === (req.user?.email || '').toLowerCase())
+    );
+
+    let myReportingChain = [];
+    let mySupervisor = null;
+    let myPeers = [];
+
+    if (currentUserObj) {
+      // 1. Upward Reporting Chain
+      let curr = currentUserObj;
+      const visited = new Set();
+      while (curr && !visited.has(curr._id ? curr._id.toString() : '')) {
+        const cId = curr._id ? curr._id.toString() : '';
+        visited.add(cId);
+        myReportingChain.push({
+          _id: curr._id,
+          name: curr.name,
+          role: curr.role,
+          roles: Array.isArray(curr.roles) && curr.roles.length > 0 ? curr.roles : [curr.role || 'User'],
+          department: curr.department || 'Operations',
+          email: curr.email,
+          avatar: curr.avatar || '',
+        });
+
+        if (!curr.reportsTo) break;
+        const repId = (curr.reportsTo._id ? curr.reportsTo._id.toString() : curr.reportsTo.toString()).trim();
+        const repName = (curr.reportsToName || '').toLowerCase().trim();
+        const nextParent = allUsers.find(
+          (u) =>
+            (u._id && u._id.toString() === repId) ||
+            (repName && u.name && u.name.toLowerCase().trim() === repName)
+        );
+        if (!nextParent || (nextParent._id && nextParent._id.toString() === cId)) break;
+        curr = nextParent;
+      }
+
+      // 2. Direct Supervisor (the immediate parent)
+      if (myReportingChain.length > 1) {
+        mySupervisor = myReportingChain[1];
+      }
+
+      // 3. Peers (Colleagues who share the same direct supervisor)
+      if (mySupervisor) {
+        const supIdStr = mySupervisor._id ? mySupervisor._id.toString() : '';
+        const supName = (mySupervisor.name || '').toLowerCase().trim();
+
+        myPeers = allUsers
+          .filter((u) => {
+            const uId = u._id ? u._id.toString() : '';
+            if (uId === currentUserIdStr) return false;
+            const rId = u.reportsTo ? (u.reportsTo._id ? u.reportsTo._id.toString() : u.reportsTo.toString()) : '';
+            const rName = (u.reportsToName || '').toLowerCase().trim();
+            return (supIdStr && rId === supIdStr) || (supName && rName === supName);
+          })
+          .map((u) => {
+            const uTasks = allTasks.filter(
+              (t) =>
+                t &&
+                ((t.assignedTo || '').toLowerCase().trim() === (u.name || '').toLowerCase().trim() ||
+                  (t.user && (t.user._id ? t.user._id.toString() : t.user.toString()) === (u._id ? u._id.toString() : '')))
+            );
+            return {
+              _id: u._id,
+              name: u.name,
+              role: u.role,
+              department: u.department || 'Operations',
+              email: u.email,
+              avatar: u.avatar || '',
+              taskCount: uTasks.length,
+              completedTasks: uTasks.filter((t) => t.status === 'Completed').length,
+            };
+          });
+      }
+    }
+
+    // Department Stats
+    const departmentMap = new Map();
+    allUsers.forEach((u) => {
+      const dept = u.department || 'Operations';
+      departmentMap.set(dept, (departmentMap.get(dept) || 0) + 1);
+    });
+    const departmentStats = Array.from(departmentMap.entries()).map(([name, count]) => ({ name, count }));
+
+    // Overall Tasks Stats
+    const completedTasksCount = allTasks.filter((t) => t && t.status === 'Completed').length;
+    const inProgressTasksCount = allTasks.filter((t) => t && t.status === 'In Progress').length;
+    const todoTasksCount = allTasks.filter((t) => t && (t.status === 'To Do' || !t.status)).length;
+
     return res.json({
       success: true,
       totalEmployees: allUsers.length,
       totalManagers: allUsers.filter((u) => u.role === 'Manager' || u.role === 'Super Admin' || u.role === 'Executive' || u.role === 'Administrator').length,
       totalUsers: allUsers.filter((u) => u.role === 'User' || !u.role || (u.role !== 'Manager' && u.role !== 'Super Admin' && u.role !== 'Executive' && u.role !== 'Administrator')).length,
+      totalTasks: allTasks.length,
+      completedTasks: completedTasksCount,
+      inProgressTasks: inProgressTasksCount,
+      todoTasks: todoTasksCount,
+      departmentStats,
       hierarchy: tree,
+      myReportingChain,
+      mySupervisor,
+      myPeers,
+      currentUser: currentUserObj
+        ? {
+            _id: currentUserObj._id,
+            name: currentUserObj.name,
+            email: currentUserObj.email,
+            role: currentUserObj.role,
+            department: currentUserObj.department || 'Operations',
+            avatar: currentUserObj.avatar || '',
+          }
+        : null,
     });
   } catch (error) {
     console.error('Fetch hierarchy error:', error);
@@ -277,6 +391,84 @@ router.get('/', protect, async (req, res) => {
       message: 'Failed to build organizational hierarchy',
       error: error.message,
     });
+  }
+});
+
+// @route   GET /api/hierarchy/chain/:userId
+// @desc    Get complete reporting chain for a specific user
+// @access  Private
+router.get('/chain/:userId', protect, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    let allUsers = [];
+
+    if (fallbackStore.isFallback) {
+      allUsers = fallbackStore.users.filter((u) => u.status !== 'Rejected' && u.status !== 'Pending');
+    } else {
+      allUsers = await User.find({ status: { $nin: ['Rejected', 'Pending'] } })
+        .select('-password')
+        .lean();
+    }
+
+    const targetUser = allUsers.find((u) => u._id && u._id.toString() === userId.toString());
+    if (!targetUser) {
+      return res.status(404).json({ success: false, message: 'User not found in hierarchy' });
+    }
+
+    const chain = [];
+    let curr = targetUser;
+    const visited = new Set();
+
+    while (curr && !visited.has(curr._id.toString())) {
+      visited.add(curr._id.toString());
+      chain.push({
+        _id: curr._id,
+        name: curr.name,
+        role: curr.role,
+        department: curr.department || 'Operations',
+        email: curr.email,
+        avatar: curr.avatar || '',
+      });
+
+      if (!curr.reportsTo) break;
+      const repId = (curr.reportsTo._id ? curr.reportsTo._id.toString() : curr.reportsTo.toString()).trim();
+      const repName = (curr.reportsToName || '').toLowerCase().trim();
+      const nextParent = allUsers.find(
+        (u) => (u._id && u._id.toString() === repId) || (repName && u.name && u.name.toLowerCase().trim() === repName)
+      );
+      if (!nextParent || (nextParent._id && nextParent._id.toString() === curr._id.toString())) break;
+      curr = nextParent;
+    }
+
+    return res.json({ success: true, chain });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// @route   GET /api/hierarchy/subordinates/:userId
+// @desc    Get all direct & indirect subordinates for a user
+// @access  Private
+router.get('/subordinates/:userId', protect, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    let allUsers = [];
+    let allTasks = [];
+
+    if (fallbackStore.isFallback) {
+      allUsers = fallbackStore.users.filter((u) => u.status !== 'Rejected' && u.status !== 'Pending');
+      allTasks = fallbackStore.tasks || [];
+    } else {
+      allUsers = await User.find({ status: { $nin: ['Rejected', 'Pending'] } })
+        .select('-password')
+        .lean();
+      allTasks = await Task.find({}).lean();
+    }
+
+    const tree = buildHierarchyTree(allUsers, allTasks, userId);
+    return res.json({ success: true, tree });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 

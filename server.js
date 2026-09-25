@@ -7,6 +7,11 @@ const { connectDB, fallbackStore } = require('./config/db');
 const User = require('./models/User');
 const Task = require('./models/Task');
 const Notification = require('./models/Notification');
+const Lead = require('./models/Lead');
+const Opportunity = require('./models/Opportunity');
+const Complaint = require('./models/Complaint');
+const Project = require('./models/Project');
+const { Subscription } = require('./models/Subscription');
 const { seedDatabase } = require('./seedData');
 
 // Load environment variables
@@ -33,11 +38,10 @@ app.set('io', io);
 
 // Socket.io Connection & Room Management
 io.on('connection', (socket) => {
-  // Handle client joining user/role rooms
   socket.on('join', (data) => {
     try {
       if (!data) return;
-      const { userId, username, role, name } = typeof data === 'string' ? JSON.parse(data) : data;
+      const { userId, username, role, roles, name } = typeof data === 'string' ? JSON.parse(data) : data;
 
       if (userId) {
         socket.join(`user:${userId.toString()}`);
@@ -48,11 +52,12 @@ io.on('connection', (socket) => {
       if (name) {
         socket.join(`user:${name.toString().toLowerCase().trim()}`);
       }
-      if (role) {
-        socket.join(`role:${role}`);
-        if (['Manager', 'Executive', 'Administrator'].includes(role)) {
-          socket.join('role:Manager');
-        }
+      const userRoles = Array.isArray(roles) && roles.length > 0 ? roles : [role || 'User'];
+      userRoles.forEach((r) => {
+        socket.join(`role:${r}`);
+      });
+      if (userRoles.some((r) => ['Manager', 'Executive', 'Administrator', 'Super Admin'].includes(r))) {
+        socket.join('role:Manager');
       }
       socket.join('all');
     } catch (err) {
@@ -62,26 +67,33 @@ io.on('connection', (socket) => {
 });
 
 // Middleware
-app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests from all origins (including Vercel, localhost, and custom domains)
-    callback(null, true);
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
-}));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      callback(null, true);
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  })
+);
 app.options('*', cors());
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Routes
+// Core API Routes
 app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/tasks', require('./routes/taskRoutes'));
 app.use('/api/users', require('./routes/userRoutes'));
 app.use('/api/hierarchy', require('./routes/hierarchyRoutes'));
 app.use('/api/notifications', require('./routes/notificationRoutes'));
+app.use('/api/leads', require('./routes/leadRoutes'));
+app.use('/api/opportunities', require('./routes/opportunityRoutes'));
+app.use('/api/complaints', require('./routes/complaintRoutes'));
+app.use('/api/projects', require('./routes/projectRoutes'));
+app.use('/api/subscriptions', require('./routes/subscriptionRoutes'));
+app.use('/api/subscription', require('./routes/subscriptionRoutes'));
 
 const mongoose = require('mongoose');
 
@@ -94,6 +106,7 @@ app.get('/api/health', (req, res) => {
     dbName: mongoose.connection ? mongoose.connection.name : 'none',
     readyState: mongoose.connection ? mongoose.connection.readyState : 0,
     dbError: fallbackStore.dbError || null,
+    activeModules: fallbackStore.subscription?.activeModules || ['leads', 'complaints', 'projects'],
     socketConnections: io.engine.clientsCount,
   });
 });
@@ -101,9 +114,12 @@ app.get('/api/health', (req, res) => {
 // Root route
 app.get('/', (req, res) => {
   res.json({
-    name: 'Task Flow Pro API',
-    version: '1.0.0',
-    description: 'Unified Task Management API is running smoothly with Real-Time Socket.io',
+    name: 'TaskFlow Pro Enterprise Modular API',
+    version: '2.0.0',
+    modules: ['Lead Management', 'Complaint Management', 'Project Management'],
+    pricing: 'Module-based annual per-user subscription',
+    roles: ['Super Admin', 'Manager', 'Sales Coordinator', 'Service Coordinator'],
+    status: 'Active with WebSockets and Real-time Live Events',
   });
 });
 
@@ -120,7 +136,18 @@ app.use((err, req, res, next) => {
 const startServer = async () => {
   try {
     const dbStatus = await connectDB();
-    await seedDatabase(dbStatus.isFallback, User, Task, fallbackStore, Notification);
+    await seedDatabase(
+      dbStatus.isFallback,
+      User,
+      Task,
+      fallbackStore,
+      Notification,
+      Lead,
+      Opportunity,
+      Complaint,
+      Project,
+      Subscription
+    );
 
     httpServer.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
@@ -133,8 +160,9 @@ const startServer = async () => {
 
     httpServer.listen(PORT, () => {
       console.log(`=========================================`);
-      console.log(`🚀 Task Management Server Running on port ${PORT}`);
+      console.log(`🚀 TaskFlow Pro Enterprise Server Running on port ${PORT}`);
       console.log(`🌐 API Endpoint: http://localhost:${PORT}/api`);
+      console.log(`📦 Active Modules: ${(fallbackStore.subscription?.activeModules || ['leads', 'complaints', 'projects']).join(', ')}`);
       console.log(`⚡ Real-Time WebSockets / Socket.io Active`);
       console.log(`📊 Mode: ${dbStatus.isFallback ? 'Fallback In-Memory Store' : 'MongoDB Database'}`);
       console.log(`=========================================`);
@@ -145,3 +173,5 @@ const startServer = async () => {
 };
 
 startServer();
+
+module.exports = { app, httpServer };

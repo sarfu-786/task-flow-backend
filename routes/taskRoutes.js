@@ -295,8 +295,14 @@ const validateHierarchyAssignment = async (assignerUser, targetAssignedTo) => {
   const targetRole = targetUser.role || 'User';
 
   // 1. Rule: Anyone can assign tasks to themselves (Super Admin, Manager, User)
-  if (assignerId && targetId && assignerId === targetId) {
-    return { valid: true, targetUser };
+  const isSelfAssignment =
+    (assignerId && targetId && assignerId === targetId) ||
+    (assignerName && cleanTarget === assignerName) ||
+    (assignerUser.username && assignerUser.username.toLowerCase().trim() === cleanTarget) ||
+    (assignerUser.email && assignerUser.email.toLowerCase().trim() === cleanTarget);
+
+  if (isSelfAssignment) {
+    return { valid: true, targetUser: targetUser || assignerUser };
   }
 
   // 2. Super Admin: Can assign tasks to everybody in the organization (all juniors below Super Admin)
@@ -537,49 +543,45 @@ router.get('/stats', protect, async (req, res) => {
     const { myTasksOnly, teamOnly } = req.query;
 
     let allTasks = [];
+    let allUsers = [];
     if (fallbackStore.isFallback) {
       allTasks = [...fallbackStore.tasks];
+      allUsers = fallbackStore.users || [];
     } else {
       allTasks = await Task.find({});
+      allUsers = await User.find({}).select('_id name username email role reportsTo reportsToName createdBy').lean();
     }
 
-    if (!isManager || myTasksOnly === 'true') {
-      const userName = req.user.name ? req.user.name.toLowerCase() : '';
-      const userUsername = req.user.username ? req.user.username.toLowerCase() : '';
-      const userId = req.user._id ? req.user._id.toString() : '';
+    if (!isSuperAdmin) {
+      const userName = (req.user.name || '').toLowerCase().trim();
+      const userUsername = (req.user.username || '').toLowerCase().trim();
+      const userId = req.user._id ? req.user._id.toString() : (req.user.id ? req.user.id.toString() : '');
 
-      allTasks = allTasks.filter((t) => {
-        const tAssigned = (t.assignedTo || '').toLowerCase();
-        const tUser = t.user ? t.user.toString() : '';
-        return tAssigned === userName || tAssigned === userUsername || tUser === userId;
-      });
-    } else if (teamOnly === 'true' && !isSuperAdmin) {
-      const managerId = req.user._id ? req.user._id.toString() : '';
-      const managerName = (req.user.name || '').toLowerCase();
-      
-      let subordinateNames = [];
-      if (fallbackStore.isFallback) {
-        subordinateNames = fallbackStore.users
-          .filter(u => 
-            (u.reportsTo && u.reportsTo.toString() === managerId) ||
-            (u.reportsToName && u.reportsToName.toLowerCase().includes(managerName))
-          )
-          .map(u => (u.name || '').toLowerCase());
+      const subordinateIdsSet = getSubordinateUserIds(req.user, allUsers);
+      const subordinateUsers = allUsers.filter((u) => u && u._id && subordinateIdsSet.has(u._id.toString()));
+      const subordinateNames = subordinateUsers.map((u) => (u.name || '').toLowerCase().trim());
+      const subordinateUsernames = subordinateUsers.map((u) => (u.username || '').toLowerCase().trim());
+      const subordinateIds = Array.from(subordinateIdsSet);
+
+      if (myTasksOnly === 'true') {
+        allTasks = allTasks.filter((t) => {
+          const tAssigned = (t.assignedTo || '').toLowerCase().trim();
+          const tUser = t.user ? t.user.toString() : '';
+          return tAssigned === userName || tAssigned === userUsername || tUser === userId;
+        });
       } else {
-        const subs = await User.find({
-          $or: [
-            { reportsTo: req.user._id },
-            { reportsToName: new RegExp(escapeRegex(req.user.name || ''), 'i') },
-          ]
-        }).select('name username');
-        subordinateNames = subs.map(s => (s.name || '').toLowerCase());
-      }
+        const validAssignees = [userName, userUsername, ...subordinateNames, ...subordinateUsernames].filter(Boolean);
+        const validUserIds = [userId, ...subordinateIds].filter(Boolean);
 
-      const validAssignees = [managerName, (req.user.username || '').toLowerCase(), ...subordinateNames];
-      allTasks = allTasks.filter((t) => {
-        const tAssigned = (t.assignedTo || '').toLowerCase();
-        return validAssignees.includes(tAssigned);
-      });
+        allTasks = allTasks.filter((t) => {
+          const tAssigned = (t.assignedTo || '').toLowerCase().trim();
+          const tUser = t.user ? t.user.toString() : '';
+          const tAssignedBy = (t.assignedBy || '').toLowerCase().trim();
+          const isAssignedToTeam = validAssignees.includes(tAssigned) || validUserIds.includes(tUser);
+          const isAssignedByTeam = tAssignedBy.includes(userName) || (userUsername && tAssignedBy.includes(userUsername)) || subordinateNames.some(n => tAssignedBy.includes(n));
+          return isAssignedToTeam || isAssignedByTeam;
+        });
+      }
     }
 
     const total = allTasks.length;
@@ -737,6 +739,7 @@ router.post('/', protect, async (req, res) => {
       assignedTo: targetAssignedTo,
       assignedBy: managerAssignedBy,
       assignedById: assignerIdStr,
+      attachments: Array.isArray(req.body.attachments) ? req.body.attachments : [],
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -913,6 +916,7 @@ router.put('/:id', protect, async (req, res) => {
         priority: priority || existing.priority,
         assignedTo: assignedTo !== undefined ? assignedTo.trim() : existing.assignedTo,
         assignedBy: assignedBy !== undefined ? assignedBy.trim() : existing.assignedBy || 'Manager (Admin)',
+        attachments: req.body.attachments !== undefined ? req.body.attachments : (existing.attachments || []),
         user: targetUserId || existing.user,
         completedAt: isNowCompleted ? existing.completedAt || new Date() : null,
         updatedAt: new Date(),
@@ -958,6 +962,7 @@ router.put('/:id', protect, async (req, res) => {
       if (completionRemark !== undefined) task.completionRemark = completionRemark.trim();
       if (status) task.status = status;
       if (priority) task.priority = priority;
+      if (req.body.attachments !== undefined) task.attachments = req.body.attachments;
       if (assignedTo !== undefined) {
         task.assignedTo = assignedTo.trim();
         if (targetUserId) task.user = targetUserId;

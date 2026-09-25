@@ -52,12 +52,17 @@ const protect = async (req, res, next) => {
         );
 
         if (localUser) {
+          const userRoles = Array.isArray(localUser.roles) && localUser.roles.length > 0
+            ? localUser.roles
+            : [localUser.role || 'User'];
+
           user = {
             _id: localUser._id,
             name: localUser.name,
             email: localUser.email,
             username: localUser.username,
-            role: localUser.role || 'User',
+            role: localUser.role || userRoles[0] || 'User',
+            roles: userRoles,
             department: localUser.department || 'Internet Work',
             avatar: localUser.avatar || '',
             status: localUser.status || 'Approved',
@@ -69,12 +74,17 @@ const protect = async (req, res, next) => {
 
       // 3. Resilient session fallback from verified JWT token
       if (!user && (cleanEmail || cleanUsername || decodedId)) {
+        const tokenRoles = Array.isArray(decoded.roles) && decoded.roles.length > 0
+          ? decoded.roles
+          : [decoded.role || 'User'];
+
         user = {
           _id: decodedId || '64e8a1' + Math.random().toString(16).substring(2, 10) + '00000000'.substring(0, 10),
           name: decoded.name || decoded.username || (cleanEmail ? cleanEmail.split('@')[0] : 'User'),
           email: decoded.email || '',
           username: decoded.username || (cleanEmail ? cleanEmail.split('@')[0] : 'user'),
-          role: decoded.role || 'User',
+          role: decoded.role || tokenRoles[0] || 'User',
+          roles: tokenRoles,
           department: 'Internet Work',
           avatar: '',
           status: 'Approved',
@@ -85,6 +95,11 @@ const protect = async (req, res, next) => {
 
       if (!user) {
         return res.status(401).json({ success: false, message: 'User account not found or access revoked' });
+      }
+
+      // Ensure roles array is always populated
+      if (!user.roles || !Array.isArray(user.roles) || user.roles.length === 0) {
+        user.roles = [user.role || 'User'];
       }
 
       req.user = user;
@@ -100,5 +115,27 @@ const protect = async (req, res, next) => {
   }
 };
 
-module.exports = { protect, JWT_SECRET };
+const checkRole = (...allowedRoles) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ success: false, message: 'Not authenticated' });
+    }
+    const userRoles = Array.isArray(req.user.roles) && req.user.roles.length > 0
+      ? req.user.roles
+      : [req.user.role || 'User'];
 
+    const hasPermission =
+      userRoles.includes('Super Admin') ||
+      userRoles.some((r) => allowedRoles.includes(r));
+
+    if (!hasPermission) {
+      return res.status(403).json({
+        success: false,
+        message: `Access denied. Requires one of roles: [${allowedRoles.join(', ')}]. Current roles: [${userRoles.join(', ')}]`,
+      });
+    }
+    next();
+  };
+};
+
+module.exports = { protect, checkRole, JWT_SECRET };

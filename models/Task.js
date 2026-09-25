@@ -59,6 +59,16 @@ const taskSchema = new mongoose.Schema({
   completedAt: {
     type: Date,
   },
+  attachments: [
+    {
+      name: { type: String, required: true },
+      url: { type: String, required: true },
+      type: { type: String, default: 'application/octet-stream' },
+      size: { type: Number, default: 0 },
+      uploadedAt: { type: Date, default: Date.now },
+      uploadedBy: { type: String, default: '' },
+    },
+  ],
   createdAt: {
     type: Date,
     default: Date.now,

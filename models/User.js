@@ -1,6 +1,16 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
+const VALID_ROLES = [
+  'Super Admin',
+  'Manager',
+  'Sales Coordinator',
+  'Service Coordinator',
+  'Executive',
+  'Administrator',
+  'User',
+];
+
 const userSchema = new mongoose.Schema({
   name: {
     type: String,
@@ -21,16 +31,23 @@ const userSchema = new mongoose.Schema({
     trim: true,
     default: '',
   },
-    password: {
-      type: String,
-      required: [true, 'Please provide a password'],
-      minlength: 4,
-      select: false,
-    },
+  password: {
+    type: String,
+    required: [true, 'Please provide a password'],
+    minlength: 4,
+    select: false,
+  },
+  // Primary role (for backward compatibility & primary title)
   role: {
     type: String,
-    enum: ['Super Admin', 'Manager', 'Executive', 'Administrator', 'User'],
     default: 'User',
+  },
+  // Array of roles for multi-role simultaneous assignment
+  roles: {
+    type: [String],
+    default: function () {
+      return this.role ? [this.role] : ['User'];
+    },
   },
   department: {
     type: String,
@@ -77,8 +94,19 @@ const userSchema = new mongoose.Schema({
   },
 });
 
-// Encrypt password using bcrypt before saving
+// Synchronize role and roles before saving
 userSchema.pre('save', async function (next) {
+  if (this.roles && Array.isArray(this.roles) && this.roles.length > 0) {
+    if (!this.role || !this.roles.includes(this.role)) {
+      this.role = this.roles[0];
+    }
+  } else if (this.role) {
+    this.roles = [this.role];
+  } else {
+    this.roles = ['User'];
+    this.role = 'User';
+  }
+
   if (!this.isModified('password')) {
     return next();
   }

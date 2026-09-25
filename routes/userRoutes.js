@@ -62,23 +62,27 @@ router.get('/', protect, async (req, res) => {
     const { search, role, department, status, reportsTo } = req.query;
 
     if (fallbackStore.isFallback) {
-      let usersList = fallbackStore.users.map((u) => ({
-        _id: u._id,
-        name: u.name,
-        email: u.email,
-        username: u.username,
-        role: u.role,
-        department: u.department,
-        avatar: u.avatar,
-        status: u.status || 'Approved',
-        reportsTo: u.reportsTo || null,
-        reportsToName: u.reportsToName || '',
-        createdBy: u.createdBy || null,
-        nodeId: u.nodeId || '',
-        nodeType: u.nodeType || '',
-        reportsToNode: u.reportsToNode || '',
-        createdAt: u.createdAt,
-      }));
+      let usersList = fallbackStore.users.map((u) => {
+        const userRoles = Array.isArray(u.roles) && u.roles.length > 0 ? u.roles : [u.role || 'User'];
+        return {
+          _id: u._id,
+          name: u.name,
+          email: u.email,
+          username: u.username,
+          role: u.role || userRoles[0],
+          roles: userRoles,
+          department: u.department,
+          avatar: u.avatar,
+          status: u.status || 'Approved',
+          reportsTo: u.reportsTo || null,
+          reportsToName: u.reportsToName || '',
+          createdBy: u.createdBy || null,
+          nodeId: u.nodeId || '',
+          nodeType: u.nodeType || '',
+          reportsToNode: u.reportsToNode || '',
+          createdAt: u.createdAt,
+        };
+      });
 
       // Scope visibility based on requester role
       const scopedIds = getScopedUserIds(req.user, fallbackStore.users);
@@ -109,12 +113,15 @@ router.get('/', protect, async (req, res) => {
             u.email.toLowerCase().includes(q) ||
             u.username.toLowerCase().includes(q) ||
             (u.department && u.department.toLowerCase().includes(q)) ||
-            (u.reportsToName && u.reportsToName.toLowerCase().includes(q))
+            (u.reportsToName && u.reportsToName.toLowerCase().includes(q)) ||
+            (u.roles && u.roles.some((r) => r.toLowerCase().includes(q)))
         );
       }
 
       if (role && role !== 'all') {
-        usersList = usersList.filter((u) => u.role === role);
+        usersList = usersList.filter(
+          (u) => u.role === role || (Array.isArray(u.roles) && u.roles.includes(role))
+        );
       }
 
       if (department && department !== 'all') {
@@ -258,9 +265,26 @@ router.post('/', protect, async (req, res) => {
     let finalReportsToName = reportsToName || '';
 
     if (requesterRole === 'User') {
-      // Regular user always assigns the new user to report directly to themselves
-      finalReportsTo = req.user._id ? req.user._id.toString() : (req.user.id ? req.user.id.toString() : '');
-      finalReportsToName = `${req.user.name} (User)`;
+      if (reportsTo) {
+        const allUsers = fallbackStore.isFallback
+          ? fallbackStore.users
+          : await User.find({}).select('_id name username role reportsTo reportsToName createdBy').lean();
+        const scopedIds = getScopedUserIds(req.user, allUsers);
+        if (scopedIds && !scopedIds.has(reportsTo.toString())) {
+          return res.status(403).json({
+            success: false,
+            message: 'You can only assign users to report to yourself or subordinates within your hierarchy.',
+          });
+        }
+        const targetParent = allUsers.find((u) => u._id && u._id.toString() === reportsTo.toString());
+        if (targetParent) {
+          finalReportsTo = targetParent._id.toString();
+          finalReportsToName = `${targetParent.name} (${targetParent.role || 'User'})`;
+        }
+      } else {
+        finalReportsTo = req.user._id ? req.user._id.toString() : (req.user.id ? req.user.id.toString() : '');
+        finalReportsToName = `${req.user.name} (User)`;
+      }
     } else if (isManager) {
       if (reportsTo) {
         const allUsers = fallbackStore.isFallback
@@ -316,13 +340,18 @@ router.post('/', protect, async (req, res) => {
       const hashedPassword = await bcrypt.hash(userPassword, salt);
       const generatedId = '64e8a1' + Math.random().toString(16).substring(2, 10) + '00000000'.substring(0, 10);
 
+      const userRoles = Array.isArray(req.body.roles) && req.body.roles.length > 0
+        ? req.body.roles
+        : [targetRole];
+
       const newUser = {
         _id: generatedId,
         name: name.trim(),
         email: cleanEmail,
         username: cleanUsername,
         password: hashedPassword,
-        role: targetRole,
+        role: targetRole || userRoles[0],
+        roles: userRoles,
         department: targetDept,
         avatar: req.body.avatar || '',
         reportsTo: finalReportsTo,
@@ -492,24 +521,15 @@ router.put('/:id', protect, async (req, res) => {
     const isManager = ['Manager', 'Executive', 'Administrator'].includes(req.user.role);
     const isManagerOrAdmin = isSuperAdmin || isManager;
 
-    // Check if target user was created by or reports to requester
+    const allUsers = fallbackStore.isFallback
+      ? fallbackStore.users
+      : await User.find({}).select('_id name username role reportsTo reportsToName createdBy').lean();
+
+    // Check if target user was created by or reports to requester in hierarchy
     let isSubordinateOrCreator = false;
-    if (fallbackStore.isFallback) {
-      const target = fallbackStore.users.find((u) => u._id && u._id.toString() === id.toString());
-      if (target) {
-        if ((target.createdBy && target.createdBy.toString() === currentUserId) ||
-            (isManager && target.reportsTo && target.reportsTo.toString() === currentUserId)) {
-          isSubordinateOrCreator = true;
-        }
-      }
-    } else {
-      const target = await User.findById(id).select('createdBy reportsTo').lean();
-      if (target) {
-        if ((target.createdBy && target.createdBy.toString() === currentUserId) ||
-            (isManager && target.reportsTo && target.reportsTo.toString() === currentUserId)) {
-          isSubordinateOrCreator = true;
-        }
-      }
+    const scopedIds = getScopedUserIds(req.user, allUsers);
+    if (scopedIds && scopedIds.has(id.toString())) {
+      isSubordinateOrCreator = true;
     }
 
     if (!isSelf && !isSuperAdmin && !isManager && !isSubordinateOrCreator) {
@@ -582,6 +602,9 @@ router.put('/:id', protect, async (req, res) => {
 
       // Only Managers/Admins can change user roles
       const finalRole = isManagerOrAdmin && role ? role : existing.role;
+      const finalRoles = isManagerOrAdmin && req.body.roles && Array.isArray(req.body.roles) && req.body.roles.length > 0
+        ? req.body.roles
+        : (isManagerOrAdmin && role ? [role] : (existing.roles || [existing.role || 'User']));
 
       const updated = {
         ...existing,
@@ -589,6 +612,7 @@ router.put('/:id', protect, async (req, res) => {
         email: cleanEmail !== undefined ? cleanEmail : existing.email,
         username: cleanUsername !== undefined ? cleanUsername : existing.username,
         role: finalRole,
+        roles: finalRoles,
         department: department !== undefined ? department.trim() : existing.department,
         avatar: avatar !== undefined ? avatar : existing.avatar,
         reportsTo: reportsTo !== undefined ? reportsTo : existing.reportsTo,

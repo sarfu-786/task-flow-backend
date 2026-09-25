@@ -13,12 +13,16 @@ const Notification = require('../models/Notification');
 const generateToken = (userOrId) => {
   if (typeof userOrId === 'object' && userOrId !== null) {
     const userId = userOrId._id ? userOrId._id.toString() : (userOrId.id ? userOrId.id.toString() : '');
+    const userRoles = Array.isArray(userOrId.roles) && userOrId.roles.length > 0
+      ? userOrId.roles
+      : [userOrId.role || 'User'];
     return jwt.sign(
       {
         id: userId,
         email: (userOrId.email || '').toLowerCase().trim(),
         username: (userOrId.username || '').toLowerCase().trim(),
-        role: userOrId.role || 'User',
+        role: userOrId.role || userRoles[0] || 'User',
+        roles: userRoles,
         name: userOrId.name || '',
       },
       JWT_SECRET,
