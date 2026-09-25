@@ -8,6 +8,7 @@ const { protect, JWT_SECRET } = require('../middleware/auth');
 const { fallbackStore } = require('../config/db');
 
 const Notification = require('../models/Notification');
+const JWT_EXPIRE = process.env.JWT_EXPIRE || '8h';
 
 // Generate JWT with comprehensive user claims for resilient session verification
 const generateToken = (userOrId) => {
@@ -26,11 +27,11 @@ const generateToken = (userOrId) => {
         name: userOrId.name || '',
       },
       JWT_SECRET,
-      { expiresIn: '30d' }
+      { expiresIn: JWT_EXPIRE }
     );
   }
   return jwt.sign({ id: userOrId ? userOrId.toString() : '' }, JWT_SECRET, {
-    expiresIn: '30d',
+    expiresIn: JWT_EXPIRE,
   });
 };
 

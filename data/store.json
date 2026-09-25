@@ -212,7 +212,7 @@
       "name": "Sarfaraj Ahmad",
       "email": "sarfrajahamad068@gmail.com",
       "username": "sarfraj",
-      "password": "$2a$10$0ZlhZUmkgvKNqxBroZOL8eXFXVN102E/yCCVdNahw8tBKnbytCtYC",
+      "password": "$2a$10$mWAlVptofUsJWXYEHR44/.hKHy0oUSs5eAx.Z/BZNqzbvG/YszGEq",
       "role": "Super Admin",
       "department": "Executive Leadership",
       "avatar": "",
@@ -1289,8 +1289,48 @@
     }
   ],
   "notifications": [],
-  "leads": [],
-  "opportunities": [],
+  "leads": [
+    {
+      "_id": "64e8d1d508132400000000",
+      "name": "Sunil Gavaskar",
+      "company": "Sunny Enterprises",
+      "phone": "+91 98200 11223",
+      "email": "sunil@sunnyent.in",
+      "source": "Website",
+      "status": "Converted",
+      "priority": "High",
+      "assignedTo": "Sarfaraj Ahmad",
+      "assignedBy": "Sarfaraj Ahmad (Super Admin)",
+      "assignedById": "64e8a1000000000000000001",
+      "user": "64e8a1000000000000000001",
+      "notes": "Interested in enterprise task hierarchy system.",
+      "convertedOpportunityId": "64e8e10e4df9c200000000",
+      "convertedAt": "2026-09-25T14:50:41.991Z",
+      "createdAt": "2026-09-25T14:50:41.988Z",
+      "updatedAt": "2026-09-25T14:50:41.991Z"
+    }
+  ],
+  "opportunities": [
+    {
+      "_id": "64e8e10e4df9c200000000",
+      "name": "Sunny Enterprises Multi-Seat License",
+      "company": "Sunny Enterprises",
+      "relatedLead": "64e8d1d508132400000000",
+      "relatedLeadName": "Sunil Gavaskar",
+      "amount": 500000,
+      "stage": "Won",
+      "probability": 100,
+      "expectedCloseDate": null,
+      "priority": "High",
+      "assignedTo": "Sarfaraj Ahmad",
+      "assignedBy": "Sarfaraj Ahmad (Super Admin)",
+      "assignedById": "64e8a1000000000000000001",
+      "user": "64e8a1000000000000000001",
+      "notes": "Interested in enterprise task hierarchy system.",
+      "createdAt": "2026-09-25T14:50:41.991Z",
+      "updatedAt": "2026-09-25T14:50:41.995Z"
+    }
+  ],
   "complaints": [
     {
       "_id": "cmp_1790145211627",
@@ -1548,5 +1588,5 @@
     "renewalDate": "2027-09-16T09:22:46.923Z",
     "updatedAt": "2026-09-16T09:22:46.924Z"
   },
-  "savedAt": "2026-09-25T10:12:06.223Z"
+  "savedAt": "2026-09-25T15:09:12.170Z"
 }
