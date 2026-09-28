@@ -18,53 +18,13 @@ const DEFAULT_PROBABILITIES = {
   Lost: 0,
 };
 
-// Safe regex character escaper
-const escapeRegex = (str) => (str ? str.toString().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '');
-
-/**
- * Helper to get all user IDs that are subordinate to (under) the assigner in hierarchy
- */
-const getSubordinateUserIds = (assignerUser, allUsers) => {
-  if (!assignerUser || !allUsers || !Array.isArray(allUsers)) return new Set();
-  const assignerId = (assignerUser._id ? assignerUser._id.toString() : (assignerUser.id ? assignerUser.id.toString() : '')).trim();
-  const assignerName = (assignerUser.name || '').toLowerCase().trim();
-
-  const subordinateIds = new Set();
-  if (!assignerId && !assignerName) return subordinateIds;
-
-  const queue = [assignerId];
-  const processed = new Set([assignerId]);
-
-  while (queue.length > 0) {
-    const currentParentId = queue.shift();
-    const parentUser = allUsers.find((u) => u && u._id && u._id.toString() === currentParentId);
-    const parentName = (parentUser?.name || (currentParentId === assignerId ? assignerName : '')).toLowerCase().trim();
-
-    for (const u of allUsers) {
-      if (!u || !u._id) continue;
-      const uIdStr = u._id.toString();
-      if (uIdStr === assignerId || processed.has(uIdStr)) continue;
-
-      const repIdStr = u.reportsTo ? (u.reportsTo._id ? u.reportsTo._id.toString() : u.reportsTo.toString()) : '';
-      const repNameStr = (u.reportsToName || '').toLowerCase().trim();
-      const createdByStr = u.createdBy ? (u.createdBy._id ? u.createdBy._id.toString() : u.createdBy.toString()) : '';
-
-      const isDirectReport =
-        (currentParentId && repIdStr === currentParentId) ||
-        (parentName && repNameStr && (repNameStr.includes(parentName) || parentName.includes(repNameStr)));
-
-      const isCreatedByParent = currentParentId && createdByStr === currentParentId;
-
-      if (isDirectReport || isCreatedByParent) {
-        subordinateIds.add(uIdStr);
-        processed.add(uIdStr);
-        queue.push(uIdStr);
-      }
-    }
-  }
-
-  return subordinateIds;
-};
+const {
+  getAllUsers,
+  getUserScopeContext,
+  isOpportunityAccessible,
+  getSubordinateUserIds,
+  escapeRegex,
+} = require('../services/hierarchyService');
 
 /**
  * Validates organizational hierarchy assignment rules for Opportunities
@@ -153,31 +113,10 @@ const validateHierarchyAssignment = async (assignerUser, targetAssignedTo) => {
 /**
  * Checks if a user has permission to access (view, edit, delete, stage update) a specific opportunity
  */
-const canUserAccessOpportunity = (currentUser, opp, allUsers) => {
+const canUserAccessOpportunity = (currentUser, opp, allUsers = []) => {
   if (!currentUser || !opp) return false;
-  if (currentUser.role === 'Super Admin') return true;
-
-  const currentUserId = (currentUser._id ? currentUser._id.toString() : (currentUser.id ? currentUser.id.toString() : '')).trim();
-  const currentUserName = (currentUser.name || '').toLowerCase().trim();
-  const currentUserUsername = (currentUser.username || '').toLowerCase().trim();
-
-  const subordinateIdsSet = getSubordinateUserIds(currentUser, allUsers);
-  const subordinateUsers = (allUsers || []).filter((u) => u && u._id && subordinateIdsSet.has(u._id.toString()));
-  const subordinateNames = subordinateUsers.map((u) => (u.name || '').toLowerCase().trim());
-  const subordinateUsernames = subordinateUsers.map((u) => (u.username || '').toLowerCase().trim());
-  const subordinateIds = Array.from(subordinateIdsSet);
-
-  const oAssigned = (opp.assignedTo || '').toLowerCase().trim();
-  const oUser = opp.user ? opp.user.toString() : '';
-  const oAssignedBy = (opp.assignedBy || '').toLowerCase().trim();
-  const oAssignedById = opp.assignedById ? opp.assignedById.toString() : '';
-
-  const isAssignedToMe = (currentUserName && oAssigned === currentUserName) || (currentUserUsername && oAssigned === currentUserUsername) || (currentUserId && oUser === currentUserId);
-  const isAssignedToMySubordinate = subordinateNames.includes(oAssigned) || subordinateUsernames.includes(oAssigned) || (oUser && subordinateIds.includes(oUser));
-  const isAssignedByMe = (currentUserName && oAssignedBy.includes(currentUserName)) || (currentUserUsername && oAssignedBy.includes(currentUserUsername)) || (currentUserId && oAssignedById === currentUserId);
-  const isAssignedByMySubordinate = subordinateNames.some(n => oAssignedBy.includes(n)) || (oAssignedById && subordinateIds.includes(oAssignedById));
-
-  return isAssignedToMe || isAssignedToMySubordinate || isAssignedByMe || isAssignedByMySubordinate;
+  const scope = getUserScopeContext(currentUser, allUsers);
+  return isOpportunityAccessible(scope, opp);
 };
 
 // @route   GET /api/opportunities
@@ -231,6 +170,7 @@ router.get('/', protect, async (req, res) => {
       });
     } else {
       const queryObj = {};
+      const andConditions = [];
 
       if (!isSuperAdmin) {
         const userName = req.user.name || '';
@@ -246,15 +186,19 @@ router.get('/', protect, async (req, res) => {
         const subordinateIds = Array.from(subordinateIdsSet);
 
         const names = [userName, userUsername, ...subordinateNames].filter(Boolean);
-        queryObj.$or = [
-          { assignedTo: { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) } },
-          { user: { $in: [req.user._id, ...subordinateIds] } },
-          { assignedBy: new RegExp(escapeRegex(userName), 'i') },
-        ];
+        andConditions.push({
+          $or: [
+            { assignedTo: { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) } },
+            { user: { $in: [req.user._id, ...subordinateIds] } },
+            { assignedBy: new RegExp(escapeRegex(userName), 'i') },
+          ],
+        });
       }
 
       if (assignedTo && assignedTo !== 'all') {
-        queryObj.assignedTo = new RegExp('^' + escapeRegex(assignedTo.trim()) + '$', 'i');
+        andConditions.push({
+          $or: [{ assignedTo: new RegExp('^' + escapeRegex(assignedTo.trim()) + '$', 'i') }],
+        });
       }
 
       if (search && search.trim() !== '') {
@@ -266,13 +210,11 @@ router.get('/', protect, async (req, res) => {
           { notes: regex },
           { assignedTo: regex },
         ];
+        andConditions.push({ $or: searchConditions });
+      }
 
-        if (queryObj.$or) {
-          queryObj.$and = [{ $or: queryObj.$or }, { $or: searchConditions }];
-          delete queryObj.$or;
-        } else {
-          queryObj.$or = searchConditions;
-        }
+      if (andConditions.length > 0) {
+        queryObj.$and = andConditions;
       }
 
       if (stage && stage !== 'all') {

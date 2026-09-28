@@ -1,11 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 const Lead = require('../models/Lead');
 const Opportunity = require('../models/Opportunity');
 const User = require('../models/User');
 const { protect } = require('../middleware/auth');
 const { fallbackStore } = require('../config/db');
+const { logAuditAction } = require('../services/auditService');
 
 // Helper to check if Lead Management module is active
 const isLeadModuleActive = () => {
@@ -26,55 +28,52 @@ const requireLeadModule = (req, res, next) => {
 
 router.use(requireLeadModule);
 
-const VALID_STATUSES = ['New', 'Contacted', 'Qualified', 'Proposal Sent', 'Converted', 'Lost'];
+const VALID_STATUSES = [
+  'New',
+  'Contacted',
+  'Follow-Up',
+  'Qualified',
+  'Interested',
+  'Converted',
+  'Not Interested',
+  'Invalid',
+  'In Progress',
+  'Lost',
+];
+
 const VALID_PRIORITIES = ['Low', 'Medium', 'High', 'Urgent'];
+const VALID_DISPOSITIONS = ['NO_ANSWER', 'BUSY', 'CALL_BACK', 'NOT_INTERESTED', 'QUALIFIED_OPPORTUNITY', 'NONE'];
 
-// Safe regex character escaper
-const escapeRegex = (str) => (str ? str.toString().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '');
+const {
+  getAllUsers,
+  getUserScopeContext,
+  isLeadAccessible,
+  getSubordinateUserIds,
+  escapeRegex,
+} = require('../services/hierarchyService');
 
-/**
- * Helper to get all user IDs that are subordinate to (under) the assigner in hierarchy
- */
-const getSubordinateUserIds = (assignerUser, allUsers) => {
-  if (!assignerUser || !allUsers || !Array.isArray(allUsers)) return new Set();
-  const assignerId = (assignerUser._id ? assignerUser._id.toString() : (assignerUser.id ? assignerUser.id.toString() : '')).trim();
-  const assignerName = (assignerUser.name || '').toLowerCase().trim();
-
-  const subordinateIds = new Set();
-  if (!assignerId && !assignerName) return subordinateIds;
-
-  const queue = [assignerId];
-  const processed = new Set([assignerId]);
-
-  while (queue.length > 0) {
-    const currentParentId = queue.shift();
-    const parentUser = allUsers.find((u) => u && u._id && u._id.toString() === currentParentId);
-    const parentName = (parentUser?.name || (currentParentId === assignerId ? assignerName : '')).toLowerCase().trim();
-
-    for (const u of allUsers) {
-      if (!u || !u._id) continue;
-      const uIdStr = u._id.toString();
-      if (uIdStr === assignerId || processed.has(uIdStr)) continue;
-
-      const repIdStr = u.reportsTo ? (u.reportsTo._id ? u.reportsTo._id.toString() : u.reportsTo.toString()) : '';
-      const repNameStr = (u.reportsToName || '').toLowerCase().trim();
-      const createdByStr = u.createdBy ? (u.createdBy._id ? u.createdBy._id.toString() : u.createdBy.toString()) : '';
-
-      const isDirectReport =
-        (currentParentId && repIdStr === currentParentId) ||
-        (parentName && repNameStr && (repNameStr.includes(parentName) || parentName.includes(repNameStr)));
-
-      const isCreatedByParent = currentParentId && createdByStr === currentParentId;
-
-      if (isDirectReport || isCreatedByParent) {
-        subordinateIds.add(uIdStr);
-        processed.add(uIdStr);
-        queue.push(uIdStr);
-      }
-    }
+// Helper to generate next sequential human-readable Lead ID (LD-001, LD-002, ...)
+const generateNextLeadId = async () => {
+  let count = 0;
+  if (fallbackStore.isFallback) {
+    count = (fallbackStore.leads || []).length;
+  } else {
+    count = await Lead.countDocuments();
   }
+  const nextNum = count + 1;
+  return `LD-${String(nextNum).padStart(3, '0')}`;
+};
 
-  return subordinateIds;
+// Helper to generate next sequential human-readable Opportunity ID (OP-001, OP-002, ...)
+const generateNextOpportunityId = async () => {
+  let count = 0;
+  if (fallbackStore.isFallback) {
+    count = (fallbackStore.opportunities || []).length;
+  } else {
+    count = await Opportunity.countDocuments();
+  }
+  const nextNum = count + 1;
+  return `OP-${String(nextNum).padStart(3, '0')}`;
 };
 
 /**
@@ -93,7 +92,7 @@ const validateHierarchyAssignment = async (assignerUser, targetAssignedTo) => {
 
   let allUsers = [];
   if (fallbackStore.isFallback) {
-    allUsers = fallbackStore.users;
+    allUsers = fallbackStore.users || [];
     targetUser = allUsers.find(
       (u) =>
         (u.name && u.name.trim().toLowerCase() === cleanTarget) ||
@@ -167,52 +166,83 @@ const validateHierarchyAssignment = async (assignerUser, targetAssignedTo) => {
 /**
  * Checks if a user has permission to access (view, edit, delete, convert) a specific lead
  */
-const canUserAccessLead = (currentUser, lead, allUsers) => {
+const canUserAccessLead = (currentUser, lead, allUsers = []) => {
   if (!currentUser || !lead) return false;
-  if (currentUser.role === 'Super Admin') return true;
-
-  const currentUserId = (currentUser._id ? currentUser._id.toString() : (currentUser.id ? currentUser.id.toString() : '')).trim();
-  const currentUserName = (currentUser.name || '').toLowerCase().trim();
-  const currentUserUsername = (currentUser.username || '').toLowerCase().trim();
-
-  const subordinateIdsSet = getSubordinateUserIds(currentUser, allUsers);
-  const subordinateUsers = (allUsers || []).filter((u) => u && u._id && subordinateIdsSet.has(u._id.toString()));
-  const subordinateNames = subordinateUsers.map((u) => (u.name || '').toLowerCase().trim());
-  const subordinateUsernames = subordinateUsers.map((u) => (u.username || '').toLowerCase().trim());
-  const subordinateIds = Array.from(subordinateIdsSet);
-
-  const lAssigned = (lead.assignedTo || '').toLowerCase().trim();
-  const lUser = lead.user ? lead.user.toString() : '';
-  const lAssignedBy = (lead.assignedBy || '').toLowerCase().trim();
-  const lAssignedById = lead.assignedById ? lead.assignedById.toString() : '';
-
-  const isAssignedToMe = (currentUserName && lAssigned === currentUserName) || (currentUserUsername && lAssigned === currentUserUsername) || (currentUserId && lUser === currentUserId);
-  const isAssignedToMySubordinate = subordinateNames.includes(lAssigned) || subordinateUsernames.includes(lAssigned) || (lUser && subordinateIds.includes(lUser));
-  const isAssignedByMe = (currentUserName && lAssignedBy.includes(currentUserName)) || (currentUserUsername && lAssignedBy.includes(currentUserUsername)) || (currentUserId && lAssignedById === currentUserId);
-  const isAssignedByMySubordinate = subordinateNames.some(n => lAssignedBy.includes(n)) || (lAssignedById && subordinateIds.includes(lAssignedById));
-
-  return isAssignedToMe || isAssignedToMySubordinate || isAssignedByMe || isAssignedByMySubordinate;
+  const scope = getUserScopeContext(currentUser, allUsers);
+  return isLeadAccessible(scope, lead);
 };
 
 // @route   GET /api/leads
-// @desc    Get all leads with role-based filtering, search, status, priority, and assignedTo filters
+// @desc    Get all leads with role-based filtering, search, status, priority, manager, assignedTo, dates, and conversion status
 // @access  Private
 router.get('/', protect, async (req, res) => {
   try {
-    const { search, status, priority, source, assignedTo } = req.query;
+    const {
+      search,
+      status,
+      priority,
+      source,
+      assignedTo,
+      manager,
+      conversionStatus,
+      startDate,
+      endDate,
+      followUpDate,
+      sla_tier,
+      disposition,
+    } = req.query;
+
     const isSuperAdmin = req.user && req.user.role === 'Super Admin';
 
     if (fallbackStore.isFallback) {
       let filtered = [...(fallbackStore.leads || [])];
       const allUsers = fallbackStore.users || [];
 
-      // Hierarchy filter: Super Admin gets all; Manager & User get self + subordinates
+      // Hierarchy filter: Super Admin gets all; Manager & User get self + subordinates + unassigned high priority
       if (!isSuperAdmin) {
         filtered = filtered.filter((lead) => canUserAccessLead(req.user, lead, allUsers));
       }
 
       if (assignedTo && assignedTo !== 'all') {
-        filtered = filtered.filter((l) => l.assignedTo && l.assignedTo.toLowerCase() === assignedTo.toLowerCase());
+        filtered = filtered.filter((l) => (l.assignedTo && l.assignedTo.toLowerCase() === assignedTo.toLowerCase()) || (l.assignedSalesUser && l.assignedSalesUser.toLowerCase() === assignedTo.toLowerCase()));
+      }
+
+      if (manager && manager !== 'all') {
+        filtered = filtered.filter((l) => (l.assignedManager && l.assignedManager.toLowerCase().includes(manager.toLowerCase())) || (l.assignedManagerName && l.assignedManagerName.toLowerCase().includes(manager.toLowerCase())));
+      }
+
+      if (conversionStatus && conversionStatus !== 'all') {
+        if (conversionStatus === 'converted') {
+          filtered = filtered.filter((l) => l.status === 'Converted' || !!l.opportunityId || !!l.convertedOpportunityId);
+        } else if (conversionStatus === 'unconverted') {
+          filtered = filtered.filter((l) => l.status !== 'Converted' && !l.opportunityId && !l.convertedOpportunityId);
+        }
+      }
+
+      if (followUpDate && followUpDate !== 'all') {
+        const targetDate = new Date(followUpDate).toISOString().split('T')[0];
+        filtered = filtered.filter((l) => {
+          if (!l.nextFollowUpDate && !l.next_followup_at) return false;
+          const fDate = new Date(l.nextFollowUpDate || l.next_followup_at).toISOString().split('T')[0];
+          return fDate === targetDate;
+        });
+      }
+
+      if (startDate) {
+        const start = new Date(startDate).getTime();
+        filtered = filtered.filter((l) => new Date(l.createdAt).getTime() >= start);
+      }
+      if (endDate) {
+        const end = new Date(endDate).getTime();
+        filtered = filtered.filter((l) => new Date(l.createdAt).getTime() <= end);
+      }
+
+      if (sla_tier !== undefined && sla_tier !== 'all') {
+        filtered = filtered.filter((l) => Number(l.sla_tier) === Number(sla_tier));
+      }
+
+      if (disposition && disposition !== 'all') {
+        filtered = filtered.filter((l) => l.disposition_code === disposition);
       }
 
       // Search filter
@@ -220,19 +250,26 @@ router.get('/', protect, async (req, res) => {
         const query = search.trim().toLowerCase();
         filtered = filtered.filter(
           (l) =>
+            (l.leadId && l.leadId.toLowerCase().includes(query)) ||
+            (l.lead_id && l.lead_id.toLowerCase().includes(query)) ||
             (l.name && l.name.toLowerCase().includes(query)) ||
+            (l.contactPerson && l.contactPerson.toLowerCase().includes(query)) ||
             (l.company && l.company.toLowerCase().includes(query)) ||
             (l.email && l.email.toLowerCase().includes(query)) ||
             (l.phone && l.phone.toLowerCase().includes(query)) ||
+            (l.mobileNumber && l.mobileNumber.toLowerCase().includes(query)) ||
+            (l.requirement && l.requirement.toLowerCase().includes(query)) ||
+            (l.remarks && l.remarks.toLowerCase().includes(query)) ||
             (l.notes && l.notes.toLowerCase().includes(query)) ||
             (l.source && l.source.toLowerCase().includes(query)) ||
-            (l.assignedTo && l.assignedTo.toLowerCase().includes(query))
+            (l.assignedTo && l.assignedTo.toLowerCase().includes(query)) ||
+            (l.assignedSalesUser && l.assignedSalesUser.toLowerCase().includes(query))
         );
       }
 
       // Status filter
       if (status && status !== 'all') {
-        filtered = filtered.filter((l) => l.status === status);
+        filtered = filtered.filter((l) => l.status === status || (l.lead_status && l.lead_status.toUpperCase() === status.toUpperCase()));
       }
 
       // Priority filter
@@ -242,7 +279,7 @@ router.get('/', protect, async (req, res) => {
 
       // Source filter
       if (source && source !== 'all') {
-        filtered = filtered.filter((l) => l.source && l.source.toLowerCase() === source.toLowerCase());
+        filtered = filtered.filter((l) => (l.source && l.source.toLowerCase() === source.toLowerCase()) || (l.campaign_source && l.campaign_source.toLowerCase() === source.toLowerCase()));
       }
 
       filtered.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -255,6 +292,7 @@ router.get('/', protect, async (req, res) => {
       });
     } else {
       const queryObj = {};
+      const andConditions = [];
 
       if (!isSuperAdmin) {
         const userName = req.user.name || '';
@@ -270,35 +308,83 @@ router.get('/', protect, async (req, res) => {
         const subordinateIds = Array.from(subordinateIdsSet);
 
         const names = [userName, userUsername, ...subordinateNames].filter(Boolean);
-        queryObj.$or = [
-          { assignedTo: { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) } },
-          { user: { $in: [req.user._id, ...subordinateIds] } },
-          { assignedBy: new RegExp(escapeRegex(userName), 'i') },
-        ];
+        andConditions.push({
+          $or: [
+            { assignedTo: { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) } },
+            { assignedSalesUser: { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) } },
+            { user: { $in: [req.user._id, ...subordinateIds] } },
+            { assignedBy: new RegExp(escapeRegex(userName), 'i') },
+            { is_high_priority_pool: true },
+            { assignedTo: 'Unassigned (High-Priority Queue)' },
+          ],
+        });
       }
 
       if (assignedTo && assignedTo !== 'all') {
-        queryObj.assignedTo = new RegExp('^' + escapeRegex(assignedTo.trim()) + '$', 'i');
+        andConditions.push({
+          $or: [
+            { assignedTo: new RegExp('^' + escapeRegex(assignedTo.trim()) + '$', 'i') },
+            { assignedSalesUser: new RegExp('^' + escapeRegex(assignedTo.trim()) + '$', 'i') },
+          ],
+        });
+      }
+
+      if (manager && manager !== 'all') {
+        queryObj.assignedManager = new RegExp(escapeRegex(manager.trim()), 'i');
+      }
+
+      if (conversionStatus && conversionStatus !== 'all') {
+        if (conversionStatus === 'converted') {
+          andConditions.push({
+            $or: [{ status: 'Converted' }, { opportunityId: { $ne: null } }],
+          });
+        } else if (conversionStatus === 'unconverted') {
+          queryObj.status = { $ne: 'Converted' };
+          queryObj.opportunityId = null;
+        }
+      }
+
+      if (followUpDate && followUpDate !== 'all') {
+        const start = new Date(followUpDate);
+        start.setHours(0, 0, 0, 0);
+        const end = new Date(followUpDate);
+        end.setHours(23, 59, 59, 999);
+        queryObj.nextFollowUpDate = { $gte: start, $lte: end };
+      }
+
+      if (startDate || endDate) {
+        queryObj.createdAt = {};
+        if (startDate) queryObj.createdAt.$gte = new Date(startDate);
+        if (endDate) queryObj.createdAt.$lte = new Date(endDate);
+      }
+
+      if (sla_tier !== undefined && sla_tier !== 'all') {
+        queryObj.sla_tier = Number(sla_tier);
+      }
+
+      if (disposition && disposition !== 'all') {
+        queryObj.disposition_code = disposition;
       }
 
       if (search && search.trim() !== '') {
         const regex = new RegExp(escapeRegex(search.trim()), 'i');
         const searchConditions = [
+          { leadId: regex },
+          { lead_id: regex },
           { name: regex },
+          { contactPerson: regex },
           { company: regex },
           { email: regex },
           { phone: regex },
+          { mobileNumber: regex },
+          { requirement: regex },
+          { remarks: regex },
           { notes: regex },
           { source: regex },
           { assignedTo: regex },
+          { assignedSalesUser: regex },
         ];
-
-        if (queryObj.$or) {
-          queryObj.$and = [{ $or: queryObj.$or }, { $or: searchConditions }];
-          delete queryObj.$or;
-        } else {
-          queryObj.$or = searchConditions;
-        }
+        andConditions.push({ $or: searchConditions });
       }
 
       if (status && status !== 'all') {
@@ -310,7 +396,16 @@ router.get('/', protect, async (req, res) => {
       }
 
       if (source && source !== 'all') {
-        queryObj.source = new RegExp('^' + escapeRegex(source.trim()) + '$', 'i');
+        andConditions.push({
+          $or: [
+            { source: new RegExp('^' + escapeRegex(source.trim()) + '$', 'i') },
+            { campaign_source: new RegExp('^' + escapeRegex(source.trim()) + '$', 'i') },
+          ],
+        });
+      }
+
+      if (andConditions.length > 0) {
+        queryObj.$and = andConditions;
       }
 
       const leads = await Lead.find(queryObj).sort({ createdAt: -1 });
@@ -333,7 +428,7 @@ router.get('/', protect, async (req, res) => {
 });
 
 // @route   GET /api/leads/stats
-// @desc    Get role-scoped metrics for leads
+// @desc    Get complete MIS statistics & breakdown distributions for Leads
 // @access  Private
 router.get('/stats', protect, async (req, res) => {
   try {
@@ -368,31 +463,140 @@ router.get('/stats', protect, async (req, res) => {
         userLeads = await Lead.find({
           $or: [
             { assignedTo: { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) } },
+            { assignedSalesUser: { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) } },
             { user: { $in: [req.user._id, ...subordinateIds] } },
             { assignedBy: new RegExp(escapeRegex(userName), 'i') },
+            { is_high_priority_pool: true },
           ],
         });
       }
     }
 
-    const total = userLeads.length;
-    const newLeads = userLeads.filter((l) => l.status === 'New').length;
-    const contacted = userLeads.filter((l) => l.status === 'Contacted').length;
-    const qualified = userLeads.filter((l) => l.status === 'Qualified').length;
-    const converted = userLeads.filter((l) => l.status === 'Converted').length;
-    const lost = userLeads.filter((l) => l.status === 'Lost').length;
-    const conversionRate = total > 0 ? Math.round((converted / total) * 100) : 0;
+    const totalLeads = userLeads.length;
+    const newLeads = userLeads.filter((l) => l.status === 'New' || l.lead_status === 'NEW').length;
+    const contactedLeads = userLeads.filter((l) => l.status === 'Contacted').length;
+    const followUpLeads = userLeads.filter((l) => l.status === 'Follow-Up' || l.status === 'Follow_Up').length;
+    const qualifiedLeads = userLeads.filter((l) => l.status === 'Qualified').length;
+    const interestedLeads = userLeads.filter((l) => l.status === 'Interested').length;
+    const convertedLeads = userLeads.filter((l) => l.status === 'Converted' || l.lead_status === 'CONVERTED' || !!l.opportunityId).length;
+    const notInterestedLeads = userLeads.filter((l) => l.status === 'Not Interested' || l.disposition_code === 'NOT_INTERESTED').length;
+    const invalidLeads = userLeads.filter((l) => l.status === 'Invalid').length;
+
+    // Follow-Ups stats
+    const now = new Date();
+    let pendingFollowUps = 0;
+    let overdueFollowUps = 0;
+    const followUpsByUserMap = {};
+
+    userLeads.forEach((lead) => {
+      const flws = Array.isArray(lead.followups) ? lead.followups : [];
+      flws.forEach((f) => {
+        if (f.status === 'Pending') {
+          pendingFollowUps++;
+          if (f.followUpDate && new Date(f.followUpDate) < now) {
+            overdueFollowUps++;
+          }
+        }
+        const user = f.assignedTo || lead.assignedTo || 'Unassigned';
+        followUpsByUserMap[user] = (followUpsByUserMap[user] || 0) + 1;
+      });
+    });
+
+    // Call stats
+    let totalCallAttempts = 0;
+    let connectedCalls = 0;
+    let noAnswerCalls = 0;
+    let callbackRequestedCalls = 0;
+    const callsByUserMap = {};
+
+    userLeads.forEach((lead) => {
+      const calls = Array.isArray(lead.callLogs) ? lead.callLogs : [];
+      totalCallAttempts += calls.length;
+      calls.forEach((c) => {
+        if (c.callStatus === 'Connected Successfully') connectedCalls++;
+        if (c.callStatus === 'No Answer') noAnswerCalls++;
+        if (c.callStatus === 'Call Back Requested') callbackRequestedCalls++;
+
+        const user = c.salesUser || lead.assignedTo || 'Sales Team';
+        callsByUserMap[user] = (callsByUserMap[user] || 0) + 1;
+      });
+    });
+
+    // Conversion rate: Converted Leads / Total Leads * 100
+    const conversionRate = totalLeads > 0 ? Number(((convertedLeads / totalLeads) * 100).toFixed(1)) : 0;
+
+    // Leads by Sales User
+    const salesUserMap = {};
+    const managerMap = {};
+    const sourceMap = {};
+    const conversionByUserMap = {};
+    const conversionByMonthMap = {};
+
+    userLeads.forEach((lead) => {
+      const sUser = lead.assignedSalesUser || lead.assignedTo || 'Unassigned';
+      if (!salesUserMap[sUser]) salesUserMap[sUser] = { count: 0, value: 0 };
+      salesUserMap[sUser].count += 1;
+      salesUserMap[sUser].value += Number(lead.estimatedValue || lead.dealValue || 0);
+
+      const mgr = lead.assignedManagerName || lead.assignedManager || 'General Management';
+      if (!managerMap[mgr]) managerMap[mgr] = { count: 0, value: 0 };
+      managerMap[mgr].count += 1;
+      managerMap[mgr].value += Number(lead.estimatedValue || lead.dealValue || 0);
+
+      const src = lead.source || lead.campaign_source || 'Website';
+      sourceMap[src] = (sourceMap[src] || 0) + 1;
+
+      if (lead.status === 'Converted' || lead.opportunityId) {
+        if (!conversionByUserMap[sUser]) conversionByUserMap[sUser] = { count: 0, value: 0 };
+        conversionByUserMap[sUser].count += 1;
+        conversionByUserMap[sUser].value += Number(lead.estimatedValue || lead.dealValue || 0);
+
+        const convDate = lead.convertedAt ? new Date(lead.convertedAt) : new Date(lead.createdAt);
+        const monthKey = convDate.toLocaleString('default', { month: 'short', year: 'numeric' });
+        if (!conversionByMonthMap[monthKey]) conversionByMonthMap[monthKey] = { count: 0, value: 0 };
+        conversionByMonthMap[monthKey].count += 1;
+        conversionByMonthMap[monthKey].value += Number(lead.estimatedValue || lead.dealValue || 0);
+      }
+    });
+
+    const leadsBySalesUser = Object.keys(salesUserMap).map((k) => ({ user: k, ...salesUserMap[k] }));
+    const leadsByManager = Object.keys(managerMap).map((k) => ({ manager: k, ...managerMap[k] }));
+    const leadsBySource = Object.keys(sourceMap).map((k) => ({ source: k, count: sourceMap[k] }));
+    const callsByUser = Object.keys(callsByUserMap).map((k) => ({ user: k, count: callsByUserMap[k] }));
+    const followUpsByUser = Object.keys(followUpsByUserMap).map((k) => ({ user: k, count: followUpsByUserMap[k] }));
+    const conversionByUser = Object.keys(conversionByUserMap).map((k) => ({ user: k, ...conversionByUserMap[k] }));
+    const conversionByMonth = Object.keys(conversionByMonthMap).map((k) => ({ month: k, ...conversionByMonthMap[k] }));
 
     res.json({
       success: true,
       stats: {
-        total,
+        total: totalLeads,
+        totalLeads,
         newLeads,
-        contacted,
-        qualified,
-        converted,
-        lost,
+        contacted: contactedLeads,
+        contactedLeads,
+        followUpLeads,
+        qualified: qualifiedLeads,
+        qualifiedLeads,
+        interestedLeads,
+        converted: convertedLeads,
+        convertedLeads,
+        notInterestedLeads,
+        invalidLeads,
+        pendingFollowUps,
+        overdueFollowUps,
+        totalCallAttempts,
+        connectedCalls,
+        noAnswerCalls,
+        callbackRequestedCalls,
         conversionRate,
+        leadsBySalesUser,
+        leadsByManager,
+        leadsBySource,
+        callsByUser,
+        followUpsByUser,
+        conversionByUser,
+        conversionByMonth,
       },
     });
   } catch (error) {
@@ -406,7 +610,7 @@ router.get('/stats', protect, async (req, res) => {
 });
 
 // @route   GET /api/leads/:id
-// @desc    Get single lead by ID with permission check
+// @desc    Get single lead with complete call history, follow-ups, and timeline journey
 // @access  Private
 router.get('/:id', protect, async (req, res) => {
   try {
@@ -416,10 +620,13 @@ router.get('/:id', protect, async (req, res) => {
 
     if (fallbackStore.isFallback) {
       allUsers = fallbackStore.users || [];
-      lead = (fallbackStore.leads || []).find((l) => l._id.toString() === id.toString());
+      lead = (fallbackStore.leads || []).find((l) => l._id.toString() === id.toString() || l.lead_id === id || l.leadId === id);
     } else {
       allUsers = await User.find({}).select('_id name username reportsTo reportsToName createdBy').lean();
       lead = await Lead.findById(id);
+      if (!lead) {
+        lead = await Lead.findOne({ $or: [{ lead_id: id }, { leadId: id }] });
+      }
     }
 
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
@@ -439,41 +646,62 @@ router.get('/:id', protect, async (req, res) => {
 });
 
 // @route   POST /api/leads
-// @desc    Create a new lead (Super Admin: assign to anyone, Manager/User: assign to self or junior subordinates)
+// @desc    Create a new lead with all required fields, timeline event, and human-readable leadId
 // @access  Private
 router.post('/', protect, async (req, res) => {
   try {
     const {
       name,
+      contactPerson,
       company,
       phone,
+      mobileNumber,
       email,
       source = 'Website',
+      requirement = '',
       status = 'New',
       priority = 'Medium',
+      estimatedValue = 0,
+      dealValue = 0,
+      assignedSalesUser,
       assignedTo,
+      assignedManager = '',
+      assignedManagerName = '',
+      remarks = '',
       notes = '',
+      nextFollowUpDate,
+      nextFollowUpTime,
     } = req.body;
 
-    if (!name || !name.trim()) {
-      return res.status(400).json({ success: false, message: 'Lead name is required' });
+    const leadName = (contactPerson || name || '').trim();
+    if (!leadName) {
+      return res.status(400).json({ success: false, message: 'Lead Name / Contact Person is required' });
     }
 
-    if (status && !VALID_STATUSES.includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: `Status must be one of: ${VALID_STATUSES.join(', ')}`,
-      });
+    // Email uniqueness check
+    const normalizedEmail = (email || '').trim().toLowerCase();
+    if (normalizedEmail) {
+      let duplicateLead = null;
+      if (fallbackStore.isFallback) {
+        duplicateLead = (fallbackStore.leads || []).find(
+          (l) => l.email && l.email.trim().toLowerCase() === normalizedEmail && !l.is_deleted
+        );
+      } else {
+        duplicateLead = await Lead.findOne({
+          email: { $regex: new RegExp(`^${normalizedEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+          is_deleted: { $ne: true },
+        });
+      }
+
+      if (duplicateLead) {
+        return res.status(400).json({
+          success: false,
+          message: `This email already exists (${normalizedEmail}). Lead emails must be unique.`,
+        });
+      }
     }
 
-    if (priority && !VALID_PRIORITIES.includes(priority)) {
-      return res.status(400).json({
-        success: false,
-        message: `Priority must be one of: ${VALID_PRIORITIES.join(', ')}`,
-      });
-    }
-
-    const targetAssignedTo = (assignedTo && assignedTo.trim()) || req.user?.name || 'Current User';
+    const targetAssignedTo = (assignedSalesUser || assignedTo || req.user?.name || 'Current User').trim();
 
     // Validate organizational hierarchy assignment
     const hierarchyCheck = await validateHierarchyAssignment(req.user, targetAssignedTo);
@@ -488,21 +716,76 @@ router.post('/', protect, async (req, res) => {
     let targetUserId = hierarchyCheck.targetUser?._id || null;
     const assignerIdStr = req.user?._id ? (req.user._id.toString ? req.user._id.toString() : req.user._id) : undefined;
 
+    const pValue = Number(estimatedValue) || Number(dealValue) || 0;
+    const leadPhone = (mobileNumber || phone || '').trim();
+    const leadNotes = (remarks || notes || '').trim();
+    const readableLeadId = await generateNextLeadId();
+
+    const initialTimeline = [
+      {
+        eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
+        eventType: 'LEAD_CREATED',
+        title: 'Lead Created',
+        description: `New lead created from ${source || 'Website'} for ${(company || leadName).trim()}.`,
+        author: req.user?.name || 'System',
+        authorId: req.user?._id?.toString() || '',
+        timestamp: new Date(),
+      },
+    ];
+
+    const initialFollowups = [];
+    if (nextFollowUpDate) {
+      initialFollowups.push({
+        followUpId: 'FLW-' + Math.floor(1000 + Math.random() * 9000),
+        followUpDate: new Date(nextFollowUpDate),
+        followUpTime: nextFollowUpTime || '',
+        reason: 'Initial follow-up scheduled upon lead creation',
+        assignedTo: targetAssignedTo,
+        remarks: leadNotes,
+        status: 'Pending',
+        createdAt: new Date(),
+      });
+    }
+
     const newLeadData = {
-      name: name.trim(),
+      lead_id: 'lead_' + crypto.randomUUID(),
+      leadId: readableLeadId,
+      name: leadName,
+      contactPerson: leadName,
       company: (company || '').trim(),
-      phone: (phone || '').trim(),
+      phone: leadPhone,
+      mobileNumber: leadPhone,
       email: (email || '').trim().toLowerCase(),
       source: (source || 'Website').trim(),
+      requirement: (requirement || '').trim(),
       status: status || 'New',
+      lead_status: (status || 'New').toUpperCase() === 'NEW' ? 'NEW' : 'IN_PROGRESS',
       priority: priority || 'Medium',
+      estimatedValue: pValue,
+      dealValue: pValue,
+      pipeline_value: pValue,
       assignedTo: targetAssignedTo,
+      assignedSalesUser: targetAssignedTo,
+      assignedManager: assignedManager || '',
+      assignedManagerName: assignedManagerName || assignedManager || '',
       assignedBy,
       assignedById: assignerIdStr,
       user: targetUserId,
-      notes: (notes || '').trim(),
+      remarks: leadNotes,
+      notes: leadNotes,
+      lastContactDate: null,
+      nextFollowUpDate: nextFollowUpDate ? new Date(nextFollowUpDate) : null,
+      nextFollowUpTime: nextFollowUpTime || '',
+      next_followup_at: nextFollowUpDate ? new Date(nextFollowUpDate) : null,
+      callLogs: [],
+      followups: initialFollowups,
+      timeline: initialTimeline,
+      opportunityId: null,
       convertedOpportunityId: null,
       convertedAt: null,
+      convertedBy: null,
+      convertedByName: '',
+      sla_tier: 0,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -515,6 +798,16 @@ router.post('/', protect, async (req, res) => {
       if (!fallbackStore.leads) fallbackStore.leads = [];
       fallbackStore.leads.unshift(createdLead);
       fallbackStore.saveToFile();
+
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: createdLead._id,
+        action: 'CREATE',
+        operator: req.user,
+        updated_state: createdLead,
+        delta: `Created lead ${createdLead.leadId} "${createdLead.name}" (${createdLead.company || 'Enterprise'})`,
+        req,
+      });
 
       if (io) {
         io.emit('leads:updated', { lead: createdLead, action: 'created' });
@@ -535,6 +828,16 @@ router.post('/', protect, async (req, res) => {
       } catch (err) {
         console.warn('Local lead backup notice:', err.message);
       }
+
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: lead._id,
+        action: 'CREATE',
+        operator: req.user,
+        updated_state: lead.toObject(),
+        delta: `Created lead ${lead.leadId} "${lead.name}" (${lead.company || 'Enterprise'})`,
+        req,
+      });
 
       if (io) {
         io.emit('leads:updated', { lead, action: 'created' });
@@ -557,44 +860,43 @@ router.post('/', protect, async (req, res) => {
 });
 
 // @route   PUT /api/leads/:id
-// @desc    Edit and update full lead details with role authorization
+// @desc    Edit and update full lead details with role authorization & audit trail
 // @access  Private
 router.put('/:id', protect, async (req, res) => {
   try {
     const { id } = req.params;
     const {
       name,
+      contactPerson,
       company,
       phone,
+      mobileNumber,
       email,
       source,
+      requirement,
       status,
       priority,
+      estimatedValue,
+      dealValue,
+      assignedSalesUser,
       assignedTo,
+      assignedManager,
+      assignedManagerName,
+      remarks,
       notes,
+      nextFollowUpDate,
+      nextFollowUpTime,
     } = req.body;
 
-    if (name !== undefined && !name.trim()) {
-      return res.status(400).json({ success: false, message: 'Lead name cannot be empty' });
+    const leadName = contactPerson !== undefined ? contactPerson.trim() : name !== undefined ? name.trim() : undefined;
+    if (leadName !== undefined && !leadName) {
+      return res.status(400).json({ success: false, message: 'Lead contact name cannot be empty' });
     }
 
-    if (status && !VALID_STATUSES.includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: `Status must be one of: ${VALID_STATUSES.join(', ')}`,
-      });
-    }
-
-    if (priority && !VALID_PRIORITIES.includes(priority)) {
-      return res.status(400).json({
-        success: false,
-        message: `Priority must be one of: ${VALID_PRIORITIES.join(', ')}`,
-      });
-    }
-
+    const assignedTarget = assignedSalesUser || assignedTo;
     let targetUserId = undefined;
-    if (assignedTo && assignedTo.trim()) {
-      const hierarchyCheck = await validateHierarchyAssignment(req.user, assignedTo.trim());
+    if (assignedTarget && assignedTarget.trim()) {
+      const hierarchyCheck = await validateHierarchyAssignment(req.user, assignedTarget.trim());
       if (!hierarchyCheck.valid) {
         return res.status(400).json({
           success: false,
@@ -605,16 +907,51 @@ router.put('/:id', protect, async (req, res) => {
     }
 
     const io = req.app.get('io');
+    const pVal = estimatedValue !== undefined ? Number(estimatedValue) : dealValue !== undefined ? Number(dealValue) : undefined;
+    const leadPhone = mobileNumber !== undefined ? mobileNumber.trim() : phone !== undefined ? phone.trim() : undefined;
+    const leadRemarks = remarks !== undefined ? remarks.trim() : notes !== undefined ? notes.trim() : undefined;
+
+    // Check duplicate email on update if email is provided
+    const normalizedEmail = email !== undefined ? email.trim().toLowerCase() : undefined;
+    if (normalizedEmail) {
+      let duplicateLead = null;
+      if (fallbackStore.isFallback) {
+        duplicateLead = (fallbackStore.leads || []).find(
+          (l) =>
+            l.email &&
+            l.email.trim().toLowerCase() === normalizedEmail &&
+            l._id.toString() !== id.toString() &&
+            l.lead_id !== id &&
+            l.leadId !== id &&
+            !l.is_deleted
+        );
+      } else {
+        duplicateLead = await Lead.findOne({
+          email: { $regex: new RegExp(`^${normalizedEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+          _id: { $ne: id },
+          lead_id: { $ne: id },
+          leadId: { $ne: id },
+          is_deleted: { $ne: true },
+        });
+      }
+
+      if (duplicateLead) {
+        return res.status(400).json({
+          success: false,
+          message: `This email already exists (${normalizedEmail}). Lead emails must be unique.`,
+        });
+      }
+    }
 
     if (fallbackStore.isFallback) {
-      const leadIndex = (fallbackStore.leads || []).findIndex((l) => l._id.toString() === id.toString());
+      const leadIndex = (fallbackStore.leads || []).findIndex((l) => l._id.toString() === id.toString() || l.lead_id === id || l.leadId === id);
       if (leadIndex === -1) {
         return res.status(404).json({ success: false, message: 'Lead not found' });
       }
 
       const existing = fallbackStore.leads[leadIndex];
+      const priorState = { ...existing };
 
-      // Authorization check
       if (!canUserAccessLead(req.user, existing, fallbackStore.users || [])) {
         return res.status(403).json({
           success: false,
@@ -622,23 +959,62 @@ router.put('/:id', protect, async (req, res) => {
         });
       }
 
+      // Check status transition
+      let timeline = Array.isArray(existing.timeline) ? [...existing.timeline] : [];
+      if (status && status !== existing.status) {
+        timeline.push({
+          eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
+          eventType: 'STATUS_CHANGED',
+          title: `Status Changed: ${status}`,
+          description: `Lead status updated from ${existing.status} to ${status}.`,
+          author: req.user?.name || 'System',
+          timestamp: new Date(),
+        });
+      }
+
       const updated = {
         ...existing,
-        name: name !== undefined ? name.trim() : existing.name,
+        name: leadName !== undefined ? leadName : existing.name,
+        contactPerson: leadName !== undefined ? leadName : existing.contactPerson || existing.name,
         company: company !== undefined ? company.trim() : existing.company,
-        phone: phone !== undefined ? phone.trim() : existing.phone,
+        phone: leadPhone !== undefined ? leadPhone : existing.phone,
+        mobileNumber: leadPhone !== undefined ? leadPhone : existing.mobileNumber || existing.phone,
         email: email !== undefined ? email.trim().toLowerCase() : existing.email,
         source: source !== undefined ? source.trim() : existing.source,
+        requirement: requirement !== undefined ? requirement.trim() : existing.requirement || '',
         status: status || existing.status,
+        lead_status: status ? (status.toUpperCase() === 'NEW' ? 'NEW' : status.toUpperCase() === 'LOST' ? 'LOST' : 'IN_PROGRESS') : existing.lead_status,
         priority: priority || existing.priority,
-        assignedTo: assignedTo !== undefined ? assignedTo.trim() : existing.assignedTo,
+        estimatedValue: pVal !== undefined ? pVal : existing.estimatedValue || existing.dealValue || 0,
+        dealValue: pVal !== undefined ? pVal : existing.dealValue || existing.estimatedValue || 0,
+        pipeline_value: pVal !== undefined ? pVal : existing.pipeline_value || existing.dealValue || 0,
+        assignedTo: assignedTarget !== undefined ? assignedTarget.trim() : existing.assignedTo,
+        assignedSalesUser: assignedTarget !== undefined ? assignedTarget.trim() : existing.assignedSalesUser || existing.assignedTo,
+        assignedManager: assignedManager !== undefined ? assignedManager.trim() : existing.assignedManager || '',
+        assignedManagerName: assignedManagerName !== undefined ? assignedManagerName.trim() : existing.assignedManagerName || existing.assignedManager || '',
         user: targetUserId !== undefined ? targetUserId : existing.user,
-        notes: notes !== undefined ? notes.trim() : existing.notes,
+        remarks: leadRemarks !== undefined ? leadRemarks : existing.remarks || existing.notes || '',
+        notes: leadRemarks !== undefined ? leadRemarks : existing.notes || existing.remarks || '',
+        nextFollowUpDate: nextFollowUpDate !== undefined ? (nextFollowUpDate ? new Date(nextFollowUpDate) : null) : existing.nextFollowUpDate,
+        nextFollowUpTime: nextFollowUpTime !== undefined ? nextFollowUpTime : existing.nextFollowUpTime || '',
+        next_followup_at: nextFollowUpDate !== undefined ? (nextFollowUpDate ? new Date(nextFollowUpDate) : null) : existing.next_followup_at,
+        timeline,
         updatedAt: new Date(),
       };
 
       fallbackStore.leads[leadIndex] = updated;
       fallbackStore.saveToFile();
+
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: updated._id,
+        action: 'UPDATE',
+        operator: req.user,
+        prior_state: priorState,
+        updated_state: updated,
+        delta: `Updated lead details for ${updated.leadId || ''} "${updated.name}"`,
+        req,
+      });
 
       if (io) {
         io.emit('leads:updated', { lead: updated, action: 'updated' });
@@ -651,6 +1027,9 @@ router.put('/:id', protect, async (req, res) => {
       });
     } else {
       let lead = await Lead.findById(id);
+      if (!lead) {
+        lead = await Lead.findOne({ $or: [{ lead_id: id }, { leadId: id }] });
+      }
       if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
 
       const allDbUsers = await User.find({}).select('_id name username reportsTo reportsToName createdBy').lean();
@@ -661,31 +1040,79 @@ router.put('/:id', protect, async (req, res) => {
         });
       }
 
-      if (name !== undefined) lead.name = name.trim();
+      const priorState = lead.toObject();
+
+      if (status && status !== lead.status) {
+        lead.timeline.push({
+          eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
+          eventType: 'STATUS_CHANGED',
+          title: `Status Changed: ${status}`,
+          description: `Lead status updated from ${lead.status} to ${status}.`,
+          author: req.user?.name || 'System',
+          timestamp: new Date(),
+        });
+      }
+
+      if (leadName !== undefined) {
+        lead.name = leadName;
+        lead.contactPerson = leadName;
+      }
       if (company !== undefined) lead.company = company.trim();
-      if (phone !== undefined) lead.phone = phone.trim();
+      if (leadPhone !== undefined) {
+        lead.phone = leadPhone;
+        lead.mobileNumber = leadPhone;
+      }
       if (email !== undefined) lead.email = email.trim().toLowerCase();
       if (source !== undefined) lead.source = source.trim();
-      if (status) lead.status = status;
+      if (requirement !== undefined) lead.requirement = requirement.trim();
+      if (status) {
+        lead.status = status;
+        lead.lead_status = status.toUpperCase() === 'NEW' ? 'NEW' : status.toUpperCase() === 'LOST' ? 'LOST' : 'IN_PROGRESS';
+      }
       if (priority) lead.priority = priority;
-      if (assignedTo !== undefined) {
-        lead.assignedTo = assignedTo.trim();
+      if (pVal !== undefined) {
+        lead.estimatedValue = pVal;
+        lead.dealValue = pVal;
+        lead.pipeline_value = pVal;
+      }
+      if (assignedTarget !== undefined) {
+        lead.assignedTo = assignedTarget.trim();
+        lead.assignedSalesUser = assignedTarget.trim();
         if (targetUserId) lead.user = targetUserId;
       }
-      if (notes !== undefined) lead.notes = notes.trim();
+      if (assignedManager !== undefined) lead.assignedManager = assignedManager.trim();
+      if (assignedManagerName !== undefined) lead.assignedManagerName = assignedManagerName.trim();
+      if (leadRemarks !== undefined) {
+        lead.remarks = leadRemarks;
+        lead.notes = leadRemarks;
+      }
+      if (nextFollowUpDate !== undefined) {
+        lead.nextFollowUpDate = nextFollowUpDate ? new Date(nextFollowUpDate) : null;
+        lead.next_followup_at = nextFollowUpDate ? new Date(nextFollowUpDate) : null;
+      }
+      if (nextFollowUpTime !== undefined) lead.nextFollowUpTime = nextFollowUpTime;
       lead.updatedAt = new Date();
 
       await lead.save();
 
       try {
-        const localIdx = (fallbackStore.leads || []).findIndex(l => l._id.toString() === id.toString());
+        const localIdx = (fallbackStore.leads || []).findIndex(l => l._id.toString() === lead._id.toString());
         if (localIdx >= 0) {
           fallbackStore.leads[localIdx] = lead.toObject();
           fallbackStore.saveToFile();
         }
-      } catch (err) {
-        console.warn('Local lead backup update notice:', err.message);
-      }
+      } catch (err) {}
+
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: lead._id,
+        action: 'UPDATE',
+        operator: req.user,
+        prior_state: priorState,
+        updated_state: lead.toObject(),
+        delta: `Updated lead details for ${lead.leadId || ''} "${lead.name}"`,
+        req,
+      });
 
       if (io) {
         io.emit('leads:updated', { lead, action: 'updated' });
@@ -708,84 +1135,173 @@ router.put('/:id', protect, async (req, res) => {
 });
 
 // @route   PATCH /api/leads/:id/status
-// @desc    Quick update status of a lead with permission check
+// @desc    Update lead status directly with timeline tracking & audit log
 // @access  Private
 router.patch('/:id/status', protect, async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status, remarks = '', notes = '' } = req.body;
 
     if (!status || !VALID_STATUSES.includes(status)) {
       return res.status(400).json({
         success: false,
-        message: `Status must be one of: ${VALID_STATUSES.join(', ')}`,
+        message: `Invalid status '${status}'. Must be one of: ${VALID_STATUSES.join(', ')}`,
       });
     }
 
     const io = req.app.get('io');
+    let targetLead = null;
 
     if (fallbackStore.isFallback) {
-      const leadIndex = (fallbackStore.leads || []).findIndex((l) => l._id.toString() === id.toString());
-      if (leadIndex === -1) {
-        return res.status(404).json({ success: false, message: 'Lead not found' });
+      const idx = (fallbackStore.leads || []).findIndex(
+        (l) => l._id.toString() === id.toString() || l.lead_id === id || l.leadId === id
+      );
+      if (idx === -1) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+      targetLead = fallbackStore.leads[idx];
+      const priorState = { ...targetLead };
+
+      if (!canUserAccessLead(req.user, targetLead, fallbackStore.users || [])) {
+        return res.status(403).json({ success: false, message: 'Forbidden: No permission to update this lead' });
       }
 
-      const existing = fallbackStore.leads[leadIndex];
-
-      if (!canUserAccessLead(req.user, existing, fallbackStore.users || [])) {
-        return res.status(403).json({
+      if (targetLead.status === 'Converted' && status !== 'Converted') {
+        return res.status(400).json({
           success: false,
-          message: 'Forbidden: You do not have permission to update this lead status',
+          message: 'Lead is already converted to an Opportunity and its status cannot be reverted.',
         });
       }
 
-      existing.status = status;
-      existing.updatedAt = new Date();
+      const prevStatus = targetLead.status;
+      targetLead.status = status;
+      targetLead.lead_status =
+        status.toUpperCase() === 'NEW'
+          ? 'NEW'
+          : status.toUpperCase() === 'LOST'
+          ? 'LOST'
+          : status.toUpperCase() === 'CONVERTED'
+          ? 'CONVERTED'
+          : 'IN_PROGRESS';
+      targetLead.stage_entered_at = new Date();
+      targetLead.days_in_stage = 0;
+      targetLead.updatedAt = new Date();
+
+      if (remarks || notes) {
+        targetLead.remarks = (remarks || notes).trim();
+        targetLead.notes = (notes || remarks).trim();
+      }
+
+      if (!Array.isArray(targetLead.timeline)) targetLead.timeline = [];
+      targetLead.timeline.push({
+        eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
+        eventType: 'STATUS_CHANGED',
+        title: status === 'Qualified' ? 'Lead Qualified' : `Status Changed: ${status}`,
+        description: `Status changed from ${prevStatus} to ${status}.${remarks ? ` Note: ${remarks}` : ''}`,
+        author: req.user?.name || 'System',
+        authorId: req.user?._id?.toString() || '',
+        timestamp: new Date(),
+      });
+
       fallbackStore.saveToFile();
 
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: targetLead._id,
+        action: 'UPDATE',
+        operator: req.user,
+        prior_state: priorState,
+        updated_state: targetLead,
+        delta: `Updated status from ${prevStatus} to ${status}`,
+        req,
+      });
+
       if (io) {
-        io.emit('leads:updated', { lead: existing, action: 'status' });
+        io.emit('leads:updated', { lead: targetLead, action: 'status_updated' });
       }
 
       return res.json({
         success: true,
         message: `Lead status updated to ${status}`,
-        lead: existing,
+        lead: targetLead,
       });
     } else {
-      const lead = await Lead.findById(id);
-      if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
+      targetLead = await Lead.findById(id);
+      if (!targetLead) {
+        targetLead = await Lead.findOne({ $or: [{ lead_id: id }, { leadId: id }] });
+      }
+      if (!targetLead) return res.status(404).json({ success: false, message: 'Lead not found' });
 
       const allDbUsers = await User.find({}).select('_id name username reportsTo reportsToName createdBy').lean();
-      if (!canUserAccessLead(req.user, lead, allDbUsers)) {
-        return res.status(403).json({
+      if (!canUserAccessLead(req.user, targetLead, allDbUsers)) {
+        return res.status(403).json({ success: false, message: 'Forbidden: No permission to update this lead' });
+      }
+
+      if (targetLead.status === 'Converted' && status !== 'Converted') {
+        return res.status(400).json({
           success: false,
-          message: 'Forbidden: You do not have permission to update this lead status',
+          message: 'Lead is already converted to an Opportunity and its status cannot be reverted.',
         });
       }
 
-      lead.status = status;
-      lead.updatedAt = new Date();
-      await lead.save();
+      const priorState = targetLead.toObject();
+      const prevStatus = targetLead.status;
+      targetLead.status = status;
+      targetLead.lead_status =
+        status.toUpperCase() === 'NEW'
+          ? 'NEW'
+          : status.toUpperCase() === 'LOST'
+          ? 'LOST'
+          : status.toUpperCase() === 'CONVERTED'
+          ? 'CONVERTED'
+          : 'IN_PROGRESS';
+      targetLead.stage_entered_at = new Date();
+      targetLead.days_in_stage = 0;
+      targetLead.updatedAt = new Date();
 
-      try {
-        const localIdx = (fallbackStore.leads || []).findIndex(l => l._id.toString() === id.toString());
-        if (localIdx >= 0) {
-          fallbackStore.leads[localIdx] = lead.toObject();
-          fallbackStore.saveToFile();
-        }
-      } catch (err) {
-        console.warn('Local lead status update notice:', err.message);
+      if (remarks || notes) {
+        targetLead.remarks = (remarks || notes).trim();
+        targetLead.notes = (notes || remarks).trim();
       }
 
+      targetLead.timeline.push({
+        eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
+        eventType: 'STATUS_CHANGED',
+        title: status === 'Qualified' ? 'Lead Qualified' : `Status Changed: ${status}`,
+        description: `Status changed from ${prevStatus} to ${status}.${remarks ? ` Note: ${remarks}` : ''}`,
+        author: req.user?.name || 'System',
+        authorId: req.user?._id?.toString() || '',
+        timestamp: new Date(),
+      });
+
+      await targetLead.save();
+
+      try {
+        const localIdx = (fallbackStore.leads || []).findIndex((l) => l._id.toString() === targetLead._id.toString());
+        if (localIdx >= 0) {
+          fallbackStore.leads[localIdx] = targetLead.toObject();
+          fallbackStore.saveToFile();
+        }
+      } catch (err) {}
+
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: targetLead._id,
+        action: 'UPDATE',
+        operator: req.user,
+        prior_state: priorState,
+        updated_state: targetLead.toObject(),
+        delta: `Updated status from ${prevStatus} to ${status}`,
+        req,
+      });
+
       if (io) {
-        io.emit('leads:updated', { lead, action: 'status' });
+        io.emit('leads:updated', { lead: targetLead, action: 'status_updated' });
       }
 
       return res.json({
         success: true,
         message: `Lead status updated to ${status}`,
-        lead,
+        lead: targetLead,
       });
     }
   } catch (error) {
@@ -798,32 +1314,718 @@ router.patch('/:id/status', protect, async (req, res) => {
   }
 });
 
-// @route   POST /api/leads/:id/convert
-// @desc    Convert a Lead to an Opportunity with authorization & assignment hierarchy check
+// @route   POST /api/leads/:id/qualify
+// @desc    Qualify a lead without automatically converting to Opportunity
 // @access  Private
-router.post('/:id/convert', protect, async (req, res) => {
+router.post('/:id/qualify', protect, async (req, res) => {
   try {
     const { id } = req.params;
     const {
-      opportunityName,
-      amount = 0,
-      stage = 'Qualification',
-      probability = 20,
-      expectedCloseDate,
-      priority,
-      assignedTo,
-      notes,
+      requirement = '',
+      estimatedValue = '',
+      dealValue = '',
+      expectedCloseDate = '',
+      nextFollowUpDate = '',
+      remarks = '',
+      notes = '',
+    } = req.body;
+
+    const io = req.app.get('io');
+    let targetLead = null;
+
+    const val = Number(estimatedValue || dealValue) || 0;
+    const fDate = nextFollowUpDate || expectedCloseDate || null;
+    const rem = (remarks || notes || '').trim();
+    const reqDetails = (requirement || '').trim();
+
+    if (fallbackStore.isFallback) {
+      const idx = (fallbackStore.leads || []).findIndex(
+        (l) => l._id.toString() === id.toString() || l.lead_id === id || l.leadId === id
+      );
+      if (idx === -1) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+      targetLead = fallbackStore.leads[idx];
+      const priorState = { ...targetLead };
+
+      if (!canUserAccessLead(req.user, targetLead, fallbackStore.users || [])) {
+        return res.status(403).json({ success: false, message: 'Forbidden: No permission to qualify this lead' });
+      }
+
+      if (targetLead.status === 'Converted' || targetLead.opportunityId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Lead is already converted to an Opportunity.',
+        });
+      }
+
+      targetLead.status = 'Qualified';
+      targetLead.lead_status = 'IN_PROGRESS';
+      targetLead.stage_entered_at = new Date();
+      targetLead.days_in_stage = 0;
+      targetLead.updatedAt = new Date();
+
+      if (reqDetails) targetLead.requirement = reqDetails;
+      if (val > 0) {
+        targetLead.estimatedValue = val;
+        targetLead.dealValue = val;
+        targetLead.pipeline_value = val;
+      }
+      if (fDate) {
+        targetLead.nextFollowUpDate = new Date(fDate);
+        targetLead.next_followup_at = new Date(fDate);
+      }
+      if (rem) {
+        targetLead.remarks = rem;
+        targetLead.notes = rem;
+      }
+
+      if (!Array.isArray(targetLead.timeline)) targetLead.timeline = [];
+      targetLead.timeline.push({
+        eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
+        eventType: 'STATUS_CHANGED',
+        title: 'Lead Qualified',
+        description: `Lead verified and marked as Qualified for opportunity pipeline.${val > 0 ? ` Estimated Deal Value: ₹${val.toLocaleString()}` : ''}${rem ? ` [${rem}]` : ''}`,
+        author: req.user?.name || 'System',
+        authorId: req.user?._id?.toString() || '',
+        timestamp: new Date(),
+      });
+
+      fallbackStore.saveToFile();
+
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: targetLead._id,
+        action: 'UPDATE',
+        operator: req.user,
+        prior_state: priorState,
+        updated_state: targetLead,
+        delta: `Qualified lead ${targetLead.leadId}`,
+        req,
+      });
+
+      if (io) {
+        io.emit('leads:updated', { lead: targetLead, action: 'qualified' });
+      }
+
+      return res.json({
+        success: true,
+        message: `Lead ${targetLead.leadId || ''} successfully marked as Qualified`,
+        lead: targetLead,
+      });
+    } else {
+      targetLead = await Lead.findById(id);
+      if (!targetLead) {
+        targetLead = await Lead.findOne({ $or: [{ lead_id: id }, { leadId: id }] });
+      }
+      if (!targetLead) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+      const allDbUsers = await User.find({}).select('_id name username reportsTo reportsToName createdBy').lean();
+      if (!canUserAccessLead(req.user, targetLead, allDbUsers)) {
+        return res.status(403).json({ success: false, message: 'Forbidden: No permission to qualify this lead' });
+      }
+
+      if (targetLead.status === 'Converted' || targetLead.opportunityId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Lead is already converted to an Opportunity.',
+        });
+      }
+
+      const priorState = targetLead.toObject();
+      targetLead.status = 'Qualified';
+      targetLead.lead_status = 'IN_PROGRESS';
+      targetLead.stage_entered_at = new Date();
+      targetLead.days_in_stage = 0;
+      targetLead.updatedAt = new Date();
+
+      if (reqDetails) targetLead.requirement = reqDetails;
+      if (val > 0) {
+        targetLead.estimatedValue = val;
+        targetLead.dealValue = val;
+        targetLead.pipeline_value = val;
+      }
+      if (fDate) {
+        targetLead.nextFollowUpDate = new Date(fDate);
+        targetLead.next_followup_at = new Date(fDate);
+      }
+      if (rem) {
+        targetLead.remarks = rem;
+        targetLead.notes = rem;
+      }
+
+      targetLead.timeline.push({
+        eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
+        eventType: 'STATUS_CHANGED',
+        title: 'Lead Qualified',
+        description: `Lead verified and marked as Qualified for opportunity pipeline.${val > 0 ? ` Estimated Deal Value: ₹${val.toLocaleString()}` : ''}${rem ? ` [${rem}]` : ''}`,
+        author: req.user?.name || 'System',
+        authorId: req.user?._id?.toString() || '',
+        timestamp: new Date(),
+      });
+
+      await targetLead.save();
+
+      try {
+        const localIdx = (fallbackStore.leads || []).findIndex((l) => l._id.toString() === targetLead._id.toString());
+        if (localIdx >= 0) {
+          fallbackStore.leads[localIdx] = targetLead.toObject();
+          fallbackStore.saveToFile();
+        }
+      } catch (err) {}
+
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: targetLead._id,
+        action: 'UPDATE',
+        operator: req.user,
+        prior_state: priorState,
+        updated_state: targetLead.toObject(),
+        delta: `Qualified lead ${targetLead.leadId}`,
+        req,
+      });
+
+      if (io) {
+        io.emit('leads:updated', { lead: targetLead, action: 'qualified' });
+      }
+
+      return res.json({
+        success: true,
+        message: `Lead ${targetLead.leadId || ''} successfully marked as Qualified`,
+        lead: targetLead,
+      });
+    }
+  } catch (error) {
+    console.error('Qualify lead error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to qualify lead',
+      error: error.message,
+    });
+  }
+});
+
+// @route   POST /api/leads/:id/calls
+// @desc    Record communication/call interaction history for a lead
+// @access  Private
+router.post('/:id/calls', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      salesUser = req.user?.name || 'Sales Representative',
+      date = new Date().toISOString().split('T')[0],
+      time = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+      callType = 'Outgoing',
+      callStatus = 'Connected Successfully',
+      duration = '',
+      callOutcome = 'Interested',
+      leadResponse = '',
+      remarks = '',
+      nextAction = '',
+      nextFollowUpDate = '',
+      nextFollowUpTime = '',
+      updateStatus = '',
     } = req.body;
 
     const io = req.app.get('io');
     let targetLead = null;
 
     if (fallbackStore.isFallback) {
-      const leadIndex = (fallbackStore.leads || []).findIndex((l) => l._id.toString() === id.toString());
+      const idx = (fallbackStore.leads || []).findIndex((l) => l._id.toString() === id.toString() || l.lead_id === id || l.leadId === id);
+      if (idx === -1) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+      targetLead = fallbackStore.leads[idx];
+      if (!canUserAccessLead(req.user, targetLead, fallbackStore.users || [])) {
+        return res.status(403).json({ success: false, message: 'Forbidden: No permission to add call log' });
+      }
+
+      const activityId = 'ACT-' + Math.floor(1000 + Math.random() * 9000);
+      const newCallLog = {
+        activityId,
+        leadId: targetLead.leadId || targetLead.lead_id || '',
+        salesUser: salesUser.trim(),
+        salesUserId: req.user?._id?.toString() || '',
+        date,
+        time,
+        callType,
+        callStatus,
+        duration: duration ? duration.trim() : '',
+        callOutcome,
+        leadResponse: leadResponse ? leadResponse.trim() : '',
+        remarks: remarks ? remarks.trim() : '',
+        nextAction: nextAction ? nextAction.trim() : '',
+        nextFollowUpDate: nextFollowUpDate || '',
+        nextFollowUpTime: nextFollowUpTime || '',
+        timestamp: new Date(),
+      };
+
+      if (!Array.isArray(targetLead.callLogs)) targetLead.callLogs = [];
+      targetLead.callLogs.push(newCallLog);
+
+      targetLead.lastContactDate = new Date();
+      targetLead.last_contacted_at = new Date();
+
+      if (nextFollowUpDate) {
+        targetLead.nextFollowUpDate = new Date(nextFollowUpDate);
+        targetLead.next_followup_at = new Date(nextFollowUpDate);
+        targetLead.nextFollowUpTime = nextFollowUpTime || '';
+
+        // Auto-create Follow-Up entry
+        if (!Array.isArray(targetLead.followups)) targetLead.followups = [];
+        targetLead.followups.push({
+          followUpId: 'FLW-' + Math.floor(1000 + Math.random() * 9000),
+          followUpDate: new Date(nextFollowUpDate),
+          followUpTime: nextFollowUpTime || '',
+          reason: leadResponse || nextAction || `Follow-up from call (${callOutcome})`,
+          assignedTo: salesUser.trim(),
+          remarks: remarks || leadResponse || '',
+          status: 'Pending',
+          createdAt: new Date(),
+        });
+      }
+
+      // Status transition logic based on outcome/parameter
+      if (updateStatus && VALID_STATUSES.includes(updateStatus) && targetLead.status !== 'Converted') {
+        targetLead.status = updateStatus;
+      } else if (callOutcome === 'Interested' && targetLead.status !== 'Converted') {
+        targetLead.status = 'Interested';
+      } else if (callOutcome === 'Qualified' && targetLead.status !== 'Converted') {
+        targetLead.status = 'Qualified';
+      } else if (callOutcome === 'Not Interested' && targetLead.status !== 'Converted') {
+        targetLead.status = 'Not Interested';
+      } else if (targetLead.status === 'New') {
+        targetLead.status = 'Contacted';
+      }
+
+      // Add to Visual Timeline
+      if (!Array.isArray(targetLead.timeline)) targetLead.timeline = [];
+      targetLead.timeline.push({
+        eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
+        eventType: 'CALL_LOGGED',
+        title: `${callType} Call — ${callStatus}${callOutcome ? ` (${callOutcome})` : ''}`,
+        description: `${salesUser}: ${leadResponse ? `"${leadResponse}" ` : ''}${remarks ? `[${remarks}] ` : ''}${nextAction ? `Next Action: ${nextAction}` : ''}`,
+        author: salesUser,
+        timestamp: new Date(),
+      });
+
+      targetLead.updatedAt = new Date();
+      fallbackStore.saveToFile();
+
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: targetLead._id,
+        action: 'CALL_LOGGED',
+        operator: req.user,
+        updated_state: targetLead,
+        delta: `Logged ${callType} call (${callStatus}, ${callOutcome}) for ${targetLead.leadId}`,
+        req,
+      });
+
+      if (io) {
+        io.emit('leads:updated', { lead: targetLead, action: 'call_logged' });
+      }
+
+      return res.status(201).json({
+        success: true,
+        message: 'Communication call log recorded successfully',
+        callLog: newCallLog,
+        lead: targetLead,
+      });
+    } else {
+      targetLead = await Lead.findById(id);
+      if (!targetLead) {
+        targetLead = await Lead.findOne({ $or: [{ lead_id: id }, { leadId: id }] });
+      }
+      if (!targetLead) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+      const allDbUsers = await User.find({}).select('_id name username reportsTo reportsToName createdBy').lean();
+      if (!canUserAccessLead(req.user, targetLead, allDbUsers)) {
+        return res.status(403).json({ success: false, message: 'Forbidden: No permission to add call log' });
+      }
+
+      const activityId = 'ACT-' + Math.floor(1000 + Math.random() * 9000);
+      const newCallLog = {
+        activityId,
+        leadId: targetLead.leadId || targetLead.lead_id || '',
+        salesUser: salesUser.trim(),
+        salesUserId: req.user?._id?.toString() || '',
+        date,
+        time,
+        callType,
+        callStatus,
+        duration: duration ? duration.trim() : '',
+        callOutcome,
+        leadResponse: leadResponse ? leadResponse.trim() : '',
+        remarks: remarks ? remarks.trim() : '',
+        nextAction: nextAction ? nextAction.trim() : '',
+        nextFollowUpDate: nextFollowUpDate || '',
+        nextFollowUpTime: nextFollowUpTime || '',
+        timestamp: new Date(),
+      };
+
+      targetLead.callLogs.push(newCallLog);
+      targetLead.lastContactDate = new Date();
+      targetLead.last_contacted_at = new Date();
+
+      if (nextFollowUpDate) {
+        targetLead.nextFollowUpDate = new Date(nextFollowUpDate);
+        targetLead.next_followup_at = new Date(nextFollowUpDate);
+        targetLead.nextFollowUpTime = nextFollowUpTime || '';
+
+        targetLead.followups.push({
+          followUpId: 'FLW-' + Math.floor(1000 + Math.random() * 9000),
+          followUpDate: new Date(nextFollowUpDate),
+          followUpTime: nextFollowUpTime || '',
+          reason: leadResponse || nextAction || `Follow-up from call (${callOutcome})`,
+          assignedTo: salesUser.trim(),
+          remarks: remarks || leadResponse || '',
+          status: 'Pending',
+          createdAt: new Date(),
+        });
+      }
+
+      if (updateStatus && VALID_STATUSES.includes(updateStatus) && targetLead.status !== 'Converted') {
+        targetLead.status = updateStatus;
+      } else if (callOutcome === 'Interested' && targetLead.status !== 'Converted') {
+        targetLead.status = 'Interested';
+      } else if (callOutcome === 'Qualified' && targetLead.status !== 'Converted') {
+        targetLead.status = 'Qualified';
+      } else if (callOutcome === 'Not Interested' && targetLead.status !== 'Converted') {
+        targetLead.status = 'Not Interested';
+      } else if (targetLead.status === 'New') {
+        targetLead.status = 'Contacted';
+      }
+
+      targetLead.timeline.push({
+        eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
+        eventType: 'CALL_LOGGED',
+        title: `${callType} Call — ${callStatus}${callOutcome ? ` (${callOutcome})` : ''}`,
+        description: `${salesUser}: ${leadResponse ? `"${leadResponse}" ` : ''}${remarks ? `[${remarks}] ` : ''}${nextAction ? `Next Action: ${nextAction}` : ''}`,
+        author: salesUser,
+        timestamp: new Date(),
+      });
+
+      targetLead.updatedAt = new Date();
+      await targetLead.save();
+
+      try {
+        const localIdx = (fallbackStore.leads || []).findIndex(l => l._id.toString() === targetLead._id.toString());
+        if (localIdx >= 0) {
+          fallbackStore.leads[localIdx] = targetLead.toObject();
+          fallbackStore.saveToFile();
+        }
+      } catch (err) {}
+
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: targetLead._id,
+        action: 'CALL_LOGGED',
+        operator: req.user,
+        updated_state: targetLead.toObject(),
+        delta: `Logged ${callType} call (${callStatus}, ${callOutcome}) for ${targetLead.leadId}`,
+        req,
+      });
+
+      if (io) {
+        io.emit('leads:updated', { lead: targetLead, action: 'call_logged' });
+      }
+
+      return res.status(201).json({
+        success: true,
+        message: 'Communication call log recorded successfully',
+        callLog: newCallLog,
+        lead: targetLead,
+      });
+    }
+  } catch (error) {
+    console.error('Call log error:', error);
+    res.status(500).json({ success: false, message: 'Failed to record call log', error: error.message });
+  }
+});
+
+// @route   GET /api/leads/:id/calls
+// @desc    Get all call logs for a lead in chronological order
+// @access  Private
+router.get('/:id/calls', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+    let lead = null;
+
+    if (fallbackStore.isFallback) {
+      lead = (fallbackStore.leads || []).find((l) => l._id.toString() === id.toString() || l.lead_id === id || l.leadId === id);
+    } else {
+      lead = await Lead.findById(id);
+      if (!lead) lead = await Lead.findOne({ $or: [{ lead_id: id }, { leadId: id }] });
+    }
+
+    if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+    const callLogs = Array.isArray(lead.callLogs) ? lead.callLogs : [];
+    return res.json({ success: true, count: callLogs.length, callLogs });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Failed to fetch call history', error: error.message });
+  }
+});
+
+// @route   POST /api/leads/:id/followups
+// @desc    Schedule a follow-up for a lead
+// @access  Private
+router.post('/:id/followups', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      followUpDate,
+      followUpTime = '',
+      reason = '',
+      assignedTo = req.user?.name || 'Sales User',
+      remarks = '',
+      status = 'Pending',
+    } = req.body;
+
+    if (!followUpDate) {
+      return res.status(400).json({ success: false, message: 'Follow-Up Date is required' });
+    }
+
+    const io = req.app.get('io');
+    let targetLead = null;
+
+    if (fallbackStore.isFallback) {
+      const idx = (fallbackStore.leads || []).findIndex((l) => l._id.toString() === id.toString() || l.lead_id === id || l.leadId === id);
+      if (idx === -1) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+      targetLead = fallbackStore.leads[idx];
+      if (!canUserAccessLead(req.user, targetLead, fallbackStore.users || [])) {
+        return res.status(403).json({ success: false, message: 'Forbidden: No permission to schedule follow-up' });
+      }
+
+      const followUpId = 'FLW-' + Math.floor(1000 + Math.random() * 9000);
+      const newFollowUp = {
+        followUpId,
+        followUpDate: new Date(followUpDate),
+        followUpTime,
+        reason: (reason || '').trim(),
+        assignedTo: (assignedTo || targetLead.assignedTo || req.user?.name || '').trim(),
+        remarks: (remarks || '').trim(),
+        status: status || 'Pending',
+        createdAt: new Date(),
+      };
+
+      if (!Array.isArray(targetLead.followups)) targetLead.followups = [];
+      targetLead.followups.push(newFollowUp);
+
+      targetLead.nextFollowUpDate = new Date(followUpDate);
+      targetLead.nextFollowUpTime = followUpTime;
+      targetLead.next_followup_at = new Date(followUpDate);
+
+      if (!Array.isArray(targetLead.timeline)) targetLead.timeline = [];
+      targetLead.timeline.push({
+        eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
+        eventType: 'FOLLOWUP_SCHEDULED',
+        title: `Follow-Up Scheduled: ${new Date(followUpDate).toLocaleDateString()}${followUpTime ? ` ${followUpTime}` : ''}`,
+        description: `Reason: ${reason || 'Customer review'}. Assigned to ${assignedTo}.`,
+        author: req.user?.name || 'System',
+        timestamp: new Date(),
+      });
+
+      targetLead.updatedAt = new Date();
+      fallbackStore.saveToFile();
+
+      if (io) io.emit('leads:updated', { lead: targetLead, action: 'followup_scheduled' });
+
+      return res.status(201).json({
+        success: true,
+        message: 'Follow-up scheduled successfully',
+        followup: newFollowUp,
+        lead: targetLead,
+      });
+    } else {
+      targetLead = await Lead.findById(id);
+      if (!targetLead) targetLead = await Lead.findOne({ $or: [{ lead_id: id }, { leadId: id }] });
+      if (!targetLead) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+      const allDbUsers = await User.find({}).select('_id name username reportsTo reportsToName createdBy').lean();
+      if (!canUserAccessLead(req.user, targetLead, allDbUsers)) {
+        return res.status(403).json({ success: false, message: 'Forbidden: No permission to schedule follow-up' });
+      }
+
+      const followUpId = 'FLW-' + Math.floor(1000 + Math.random() * 9000);
+      const newFollowUp = {
+        followUpId,
+        followUpDate: new Date(followUpDate),
+        followUpTime,
+        reason: (reason || '').trim(),
+        assignedTo: (assignedTo || targetLead.assignedTo || req.user?.name || '').trim(),
+        remarks: (remarks || '').trim(),
+        status: status || 'Pending',
+        createdAt: new Date(),
+      };
+
+      targetLead.followups.push(newFollowUp);
+      targetLead.nextFollowUpDate = new Date(followUpDate);
+      targetLead.nextFollowUpTime = followUpTime;
+      targetLead.next_followup_at = new Date(followUpDate);
+
+      targetLead.timeline.push({
+        eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
+        eventType: 'FOLLOWUP_SCHEDULED',
+        title: `Follow-Up Scheduled: ${new Date(followUpDate).toLocaleDateString()}${followUpTime ? ` ${followUpTime}` : ''}`,
+        description: `Reason: ${reason || 'Customer review'}. Assigned to ${assignedTo}.`,
+        author: req.user?.name || 'System',
+        timestamp: new Date(),
+      });
+
+      targetLead.updatedAt = new Date();
+      await targetLead.save();
+
+      if (io) io.emit('leads:updated', { lead: targetLead, action: 'followup_scheduled' });
+
+      return res.status(201).json({
+        success: true,
+        message: 'Follow-up scheduled successfully',
+        followup: newFollowUp,
+        lead: targetLead,
+      });
+    }
+  } catch (error) {
+    console.error('Schedule follow-up error:', error);
+    res.status(500).json({ success: false, message: 'Failed to schedule follow-up', error: error.message });
+  }
+});
+
+// @route   GET /api/leads/:id/followups
+// @desc    Get all follow-ups for a lead
+// @access  Private
+router.get('/:id/followups', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+    let lead = null;
+
+    if (fallbackStore.isFallback) {
+      lead = (fallbackStore.leads || []).find((l) => l._id.toString() === id.toString() || l.lead_id === id || l.leadId === id);
+    } else {
+      lead = await Lead.findById(id);
+      if (!lead) lead = await Lead.findOne({ $or: [{ lead_id: id }, { leadId: id }] });
+    }
+
+    if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+    const followups = Array.isArray(lead.followups) ? lead.followups : [];
+    return res.json({ success: true, count: followups.length, followups });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Failed to fetch follow-ups', error: error.message });
+  }
+});
+
+// @route   PUT /api/leads/:id/followups/:followUpId
+// @desc    Update a follow-up status, remarks, or date
+// @access  Private
+router.put('/:id/followups/:followUpId', protect, async (req, res) => {
+  try {
+    const { id, followUpId } = req.params;
+    const { status, remarks, followUpDate, followUpTime } = req.body;
+    const io = req.app.get('io');
+
+    let targetLead = null;
+
+    if (fallbackStore.isFallback) {
+      const idx = (fallbackStore.leads || []).findIndex((l) => l._id.toString() === id.toString() || l.lead_id === id || l.leadId === id);
+      if (idx === -1) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+      targetLead = fallbackStore.leads[idx];
+      const flw = (targetLead.followups || []).find((f) => f.followUpId === followUpId || f._id?.toString() === followUpId);
+      if (!flw) return res.status(404).json({ success: false, message: 'Follow-up not found' });
+
+      if (status) flw.status = status;
+      if (remarks !== undefined) flw.remarks = remarks;
+      if (followUpDate) flw.followUpDate = new Date(followUpDate);
+      if (followUpTime) flw.followUpTime = followUpTime;
+
+      if (status === 'Completed') {
+        flw.completedAt = new Date();
+        flw.completedBy = req.user?.name || 'User';
+
+        if (!Array.isArray(targetLead.timeline)) targetLead.timeline = [];
+        targetLead.timeline.push({
+          eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
+          eventType: 'FOLLOWUP_UPDATED',
+          title: 'Follow-Up Completed',
+          description: `Follow-up (${flw.reason || 'Callback'}) marked as Completed by ${req.user?.name || 'User'}.`,
+          author: req.user?.name || 'User',
+          timestamp: new Date(),
+        });
+      }
+
+      targetLead.updatedAt = new Date();
+      fallbackStore.saveToFile();
+
+      if (io) io.emit('leads:updated', { lead: targetLead, action: 'followup_updated' });
+
+      return res.json({ success: true, message: 'Follow-up updated successfully', followup: flw, lead: targetLead });
+    } else {
+      targetLead = await Lead.findById(id);
+      if (!targetLead) targetLead = await Lead.findOne({ $or: [{ lead_id: id }, { leadId: id }] });
+      if (!targetLead) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+      const flw = targetLead.followups.find((f) => f.followUpId === followUpId || f._id?.toString() === followUpId);
+      if (!flw) return res.status(404).json({ success: false, message: 'Follow-up not found' });
+
+      if (status) flw.status = status;
+      if (remarks !== undefined) flw.remarks = remarks;
+      if (followUpDate) flw.followUpDate = new Date(followUpDate);
+      if (followUpTime) flw.followUpTime = followUpTime;
+
+      if (status === 'Completed') {
+        flw.completedAt = new Date();
+        flw.completedBy = req.user?.name || 'User';
+
+        targetLead.timeline.push({
+          eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
+          eventType: 'FOLLOWUP_UPDATED',
+          title: 'Follow-Up Completed',
+          description: `Follow-up (${flw.reason || 'Callback'}) marked as Completed by ${req.user?.name || 'User'}.`,
+          author: req.user?.name || 'User',
+          timestamp: new Date(),
+        });
+      }
+
+      targetLead.updatedAt = new Date();
+      await targetLead.save();
+
+      if (io) io.emit('leads:updated', { lead: targetLead, action: 'followup_updated' });
+
+      return res.json({ success: true, message: 'Follow-up updated successfully', followup: flw, lead: targetLead });
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Failed to update follow-up', error: error.message });
+  }
+});
+
+// @route   POST /api/leads/:id/convert
+// @desc    Convert a Lead to an Opportunity with strict status, duplicate prevention, and bidirectional linkage
+// @access  Private
+router.post('/:id/convert', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      opportunityName,
+      dealValue = 0,
+      amount = 0,
+      stage = 'Qualification',
+      expectedCloseDate,
+      assignedTo,
+      remarks = '',
+      notes = '',
+    } = req.body;
+
+    const io = req.app.get('io');
+    let targetLead = null;
+
+    if (fallbackStore.isFallback) {
+      const leadIndex = (fallbackStore.leads || []).findIndex((l) => l._id.toString() === id.toString() || l.lead_id === id || l.leadId === id);
       if (leadIndex === -1) {
         return res.status(404).json({ success: false, message: 'Lead not found' });
       }
       targetLead = fallbackStore.leads[leadIndex];
+      const priorState = { ...targetLead };
 
       if (!canUserAccessLead(req.user, targetLead, fallbackStore.users || [])) {
         return res.status(403).json({
@@ -832,7 +2034,26 @@ router.post('/:id/convert', protect, async (req, res) => {
         });
       }
 
-      const oppAssignedTo = (assignedTo && assignedTo.trim()) || targetLead.assignedTo || req.user?.name || 'Current User';
+      // 1. Strict Duplicate Conversion Prevention
+      if (targetLead.status === 'Converted' || targetLead.opportunityId || targetLead.convertedOpportunityId) {
+        const existingOppId = targetLead.opportunityId || 'already assigned';
+        return res.status(400).json({
+          success: false,
+          message: `This Lead has already been converted to Opportunity ${existingOppId}. Duplicate conversion is strictly prohibited.`,
+          opportunityId: targetLead.opportunityId,
+        });
+      }
+
+      // 2. Strict Status Requirement: Only Qualified or Interested
+      const currentStatus = targetLead.status || '';
+      if (!['Qualified', 'Interested'].includes(currentStatus)) {
+        return res.status(400).json({
+          success: false,
+          message: `A Lead can be converted into an Opportunity only when its status is Qualified or Interested. Current status is '${currentStatus}'.`,
+        });
+      }
+
+      const oppAssignedTo = (assignedTo && assignedTo.trim()) || targetLead.assignedSalesUser || targetLead.assignedTo || req.user?.name || 'Current User';
       const hierarchyCheck = await validateHierarchyAssignment(req.user, oppAssignedTo);
       if (!hierarchyCheck.valid) {
         return res.status(400).json({
@@ -841,26 +2062,53 @@ router.post('/:id/convert', protect, async (req, res) => {
         });
       }
 
-      let oppTargetUserId = hierarchyCheck.targetUser?._id || targetLead.user || null;
+      const oppTargetUserId = hierarchyCheck.targetUser?._id || targetLead.user || null;
       const assignerIdStr = req.user?._id ? (req.user._id.toString ? req.user._id.toString() : req.user._id) : undefined;
+      const oppValue = Number(dealValue) || Number(amount) || targetLead.estimatedValue || targetLead.dealValue || targetLead.pipeline_value || 0;
 
+      // Probability mapped from stage
+      const stageProbMap = {
+        Qualification: 20,
+        'Needs Analysis': 40,
+        Proposal: 60,
+        Negotiation: 80,
+        'Closed Won': 100,
+        'Closed Lost': 0,
+      };
+      const probability = stageProbMap[stage] !== undefined ? stageProbMap[stage] : 20;
+
+      const generatedOppReadableId = await generateNextOpportunityId();
       const generatedOppId = '64e8e1' + Math.random().toString(16).substring(2, 10) + '00000000'.substring(0, 10);
+
+      const oppRemarks = (remarks || notes || targetLead.remarks || targetLead.notes || '').trim();
+
       const oppData = {
         _id: generatedOppId,
-        name: (opportunityName && opportunityName.trim()) || `${targetLead.name} - Deal`,
+        opportunity_id: 'opp_' + crypto.randomUUID(),
+        opportunityId: generatedOppReadableId,
+        name: (opportunityName && opportunityName.trim()) || `${targetLead.company || targetLead.name} - Opportunity`,
+        opportunityName: (opportunityName && opportunityName.trim()) || `${targetLead.company || targetLead.name} - Opportunity`,
         company: targetLead.company || '',
+        leadId: targetLead.leadId || targetLead.lead_id || '',
         relatedLead: targetLead._id,
         relatedLeadName: targetLead.name || '',
-        amount: Number(amount) || 0,
+        sourceLeadName: targetLead.name || '',
+        amount: oppValue,
+        dealValue: oppValue,
+        pipeline_value: oppValue,
         stage: stage || 'Qualification',
-        probability: probability !== undefined ? Number(probability) : 20,
+        opportunity_stage: (stage || 'Qualification').toUpperCase().replace(/\s+/g, '_'),
+        probability,
         expectedCloseDate: expectedCloseDate ? new Date(expectedCloseDate) : null,
-        priority: priority || targetLead.priority || 'Medium',
+        priority: targetLead.priority || 'Medium',
+        campaign_source: targetLead.source || targetLead.campaign_source || 'Website Direct',
+        cost_per_lead: targetLead.cost_per_lead || 25.0,
         assignedTo: oppAssignedTo,
         assignedBy: `${req.user?.name || 'User'} (${req.user?.role || 'User'})`,
         assignedById: assignerIdStr,
         user: oppTargetUserId,
-        notes: notes !== undefined ? notes.trim() : targetLead.notes || '',
+        remarks: oppRemarks,
+        notes: oppRemarks,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -868,13 +2116,40 @@ router.post('/:id/convert', protect, async (req, res) => {
       if (!fallbackStore.opportunities) fallbackStore.opportunities = [];
       fallbackStore.opportunities.unshift(oppData);
 
-      // Update lead to Converted
+      // Update lead to Converted and record conversion linkage
       targetLead.status = 'Converted';
+      targetLead.lead_status = 'CONVERTED';
+      targetLead.opportunityId = generatedOppReadableId;
       targetLead.convertedOpportunityId = generatedOppId;
       targetLead.convertedAt = new Date();
-      targetLead.updatedAt = new Date();
+      targetLead.convertedBy = req.user?._id || null;
+      targetLead.convertedByName = req.user?.name || 'Sales User';
 
+      // Add visual timeline event
+      if (!Array.isArray(targetLead.timeline)) targetLead.timeline = [];
+      targetLead.timeline.push({
+        eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
+        eventType: 'CONVERTED_TO_OPPORTUNITY',
+        title: `Converted to Opportunity ${generatedOppReadableId}`,
+        description: `Lead converted to Opportunity "${oppData.name}" with deal value of ${oppValue > 0 ? '₹' + oppValue.toLocaleString() : '₹0'}.`,
+        author: req.user?.name || 'System',
+        authorId: req.user?._id?.toString() || '',
+        timestamp: new Date(),
+      });
+
+      targetLead.updatedAt = new Date();
       fallbackStore.saveToFile();
+
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: targetLead._id,
+        action: 'CONVERT',
+        operator: req.user,
+        prior_state: priorState,
+        updated_state: targetLead,
+        delta: `Converted lead ${targetLead.leadId} to Opportunity ${generatedOppReadableId} (${oppData.name})`,
+        req,
+      });
 
       if (io) {
         io.emit('leads:updated', { lead: targetLead, action: 'converted' });
@@ -883,12 +2158,15 @@ router.post('/:id/convert', protect, async (req, res) => {
 
       return res.status(201).json({
         success: true,
-        message: 'Lead converted to opportunity successfully',
+        message: `Lead ${targetLead.leadId} successfully converted to Opportunity ${generatedOppReadableId}`,
         lead: targetLead,
         opportunity: oppData,
       });
     } else {
       targetLead = await Lead.findById(id);
+      if (!targetLead) {
+        targetLead = await Lead.findOne({ $or: [{ lead_id: id }, { leadId: id }] });
+      }
       if (!targetLead) {
         return res.status(404).json({ success: false, message: 'Lead not found' });
       }
@@ -901,7 +2179,27 @@ router.post('/:id/convert', protect, async (req, res) => {
         });
       }
 
-      const oppAssignedTo = (assignedTo && assignedTo.trim()) || targetLead.assignedTo || req.user?.name || 'Current User';
+      // 1. Strict Duplicate Conversion Prevention
+      if (targetLead.status === 'Converted' || targetLead.opportunityId || targetLead.convertedOpportunityId) {
+        const existingOppId = targetLead.opportunityId || 'already assigned';
+        return res.status(400).json({
+          success: false,
+          message: `This Lead has already been converted to Opportunity ${existingOppId}. Duplicate conversion is strictly prohibited.`,
+          opportunityId: targetLead.opportunityId,
+        });
+      }
+
+      // 2. Strict Status Requirement: Only Qualified or Interested
+      const currentStatus = targetLead.status || '';
+      if (!['Qualified', 'Interested'].includes(currentStatus)) {
+        return res.status(400).json({
+          success: false,
+          message: `A Lead can be converted into an Opportunity only when its status is Qualified or Interested. Current status is '${currentStatus}'.`,
+        });
+      }
+
+      const priorState = targetLead.toObject();
+      const oppAssignedTo = (assignedTo && assignedTo.trim()) || targetLead.assignedSalesUser || targetLead.assignedTo || req.user?.name || 'Current User';
       const hierarchyCheck = await validateHierarchyAssignment(req.user, oppAssignedTo);
       if (!hierarchyCheck.valid) {
         return res.status(400).json({
@@ -910,24 +2208,49 @@ router.post('/:id/convert', protect, async (req, res) => {
         });
       }
 
-      let oppTargetUserId = hierarchyCheck.targetUser?._id || targetLead.user || null;
+      const oppTargetUserId = hierarchyCheck.targetUser?._id || targetLead.user || null;
       const assignerIdStr = req.user?._id ? (req.user._id.toString ? req.user._id.toString() : req.user._id) : undefined;
+      const oppValue = Number(dealValue) || Number(amount) || targetLead.estimatedValue || targetLead.dealValue || targetLead.pipeline_value || 0;
+
+      const stageProbMap = {
+        Qualification: 20,
+        'Needs Analysis': 40,
+        Proposal: 60,
+        Negotiation: 80,
+        'Closed Won': 100,
+        'Closed Lost': 0,
+      };
+      const probability = stageProbMap[stage] !== undefined ? stageProbMap[stage] : 20;
+
+      const generatedOppReadableId = await generateNextOpportunityId();
+      const oppRemarks = (remarks || notes || targetLead.remarks || targetLead.notes || '').trim();
 
       const oppData = {
-        name: (opportunityName && opportunityName.trim()) || `${targetLead.name} - Deal`,
+        opportunity_id: 'opp_' + crypto.randomUUID(),
+        opportunityId: generatedOppReadableId,
+        name: (opportunityName && opportunityName.trim()) || `${targetLead.company || targetLead.name} - Opportunity`,
+        opportunityName: (opportunityName && opportunityName.trim()) || `${targetLead.company || targetLead.name} - Opportunity`,
         company: targetLead.company || '',
+        leadId: targetLead.leadId || targetLead.lead_id || '',
         relatedLead: targetLead._id,
         relatedLeadName: targetLead.name || '',
-        amount: Number(amount) || 0,
+        sourceLeadName: targetLead.name || '',
+        amount: oppValue,
+        dealValue: oppValue,
+        pipeline_value: oppValue,
         stage: stage || 'Qualification',
-        probability: probability !== undefined ? Number(probability) : 20,
+        opportunity_stage: (stage || 'Qualification').toUpperCase().replace(/\s+/g, '_'),
+        probability,
         expectedCloseDate: expectedCloseDate ? new Date(expectedCloseDate) : null,
-        priority: priority || targetLead.priority || 'Medium',
+        priority: targetLead.priority || 'Medium',
+        campaign_source: targetLead.source || targetLead.campaign_source || 'Website Direct',
+        cost_per_lead: targetLead.cost_per_lead || 25.0,
         assignedTo: oppAssignedTo,
         assignedBy: `${req.user?.name || 'User'} (${req.user?.role || 'User'})`,
         assignedById: assignerIdStr,
         user: oppTargetUserId,
-        notes: notes !== undefined ? notes.trim() : targetLead.notes || '',
+        remarks: oppRemarks,
+        notes: oppRemarks,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -935,8 +2258,23 @@ router.post('/:id/convert', protect, async (req, res) => {
       const opportunity = await Opportunity.create(oppData);
 
       targetLead.status = 'Converted';
+      targetLead.lead_status = 'CONVERTED';
+      targetLead.opportunityId = generatedOppReadableId;
       targetLead.convertedOpportunityId = opportunity._id;
       targetLead.convertedAt = new Date();
+      targetLead.convertedBy = req.user?._id || null;
+      targetLead.convertedByName = req.user?.name || 'Sales User';
+
+      targetLead.timeline.push({
+        eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
+        eventType: 'CONVERTED_TO_OPPORTUNITY',
+        title: `Converted to Opportunity ${generatedOppReadableId}`,
+        description: `Lead converted to Opportunity "${opportunity.name}" with deal value of ${oppValue > 0 ? '₹' + oppValue.toLocaleString() : '₹0'}.`,
+        author: req.user?.name || 'System',
+        authorId: req.user?._id?.toString() || '',
+        timestamp: new Date(),
+      });
+
       targetLead.updatedAt = new Date();
       await targetLead.save();
 
@@ -944,14 +2282,23 @@ router.post('/:id/convert', protect, async (req, res) => {
       try {
         if (!fallbackStore.opportunities) fallbackStore.opportunities = [];
         fallbackStore.opportunities.unshift(opportunity.toObject());
-        const localIdx = (fallbackStore.leads || []).findIndex(l => l._id.toString() === id.toString());
+        const localIdx = (fallbackStore.leads || []).findIndex(l => l._id.toString() === targetLead._id.toString());
         if (localIdx >= 0) {
           fallbackStore.leads[localIdx] = targetLead.toObject();
         }
         fallbackStore.saveToFile();
-      } catch (err) {
-        console.warn('Local lead conversion backup notice:', err.message);
-      }
+      } catch (err) {}
+
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: targetLead._id,
+        action: 'CONVERT',
+        operator: req.user,
+        prior_state: priorState,
+        updated_state: targetLead.toObject(),
+        delta: `Converted lead ${targetLead.leadId} to Opportunity ${generatedOppReadableId} (${opportunity.name})`,
+        req,
+      });
 
       if (io) {
         io.emit('leads:updated', { lead: targetLead, action: 'converted' });
@@ -960,7 +2307,7 @@ router.post('/:id/convert', protect, async (req, res) => {
 
       return res.status(201).json({
         success: true,
-        message: 'Lead converted to opportunity successfully',
+        message: `Lead ${targetLead.leadId} successfully converted to Opportunity ${generatedOppReadableId}`,
         lead: targetLead,
         opportunity,
       });
@@ -976,7 +2323,7 @@ router.post('/:id/convert', protect, async (req, res) => {
 });
 
 // @route   DELETE /api/leads/:id
-// @desc    Delete a lead with authorization check
+// @desc    Delete a lead with authorization check & immutable audit log
 // @access  Private
 router.delete('/:id', protect, async (req, res) => {
   try {
@@ -984,7 +2331,7 @@ router.delete('/:id', protect, async (req, res) => {
     const io = req.app.get('io');
 
     if (fallbackStore.isFallback) {
-      const leadIndex = (fallbackStore.leads || []).findIndex((l) => l._id.toString() === id.toString());
+      const leadIndex = (fallbackStore.leads || []).findIndex((l) => l._id.toString() === id.toString() || l.lead_id === id || l.leadId === id);
       if (leadIndex === -1) {
         return res.status(404).json({ success: false, message: 'Lead not found' });
       }
@@ -1000,6 +2347,16 @@ router.delete('/:id', protect, async (req, res) => {
       const deleted = fallbackStore.leads.splice(leadIndex, 1)[0];
       fallbackStore.saveToFile();
 
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: deleted._id,
+        action: 'DELETE',
+        operator: req.user,
+        prior_state: deleted,
+        delta: `Deleted lead ${deleted.leadId || ''} "${deleted.name}"`,
+        req,
+      });
+
       if (io) {
         io.emit('leads:updated', { id, action: 'deleted' });
       }
@@ -1010,7 +2367,8 @@ router.delete('/:id', protect, async (req, res) => {
         lead: deleted,
       });
     } else {
-      const lead = await Lead.findById(id);
+      let lead = await Lead.findById(id);
+      if (!lead) lead = await Lead.findOne({ $or: [{ lead_id: id }, { leadId: id }] });
       if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
 
       const allDbUsers = await User.find({}).select('_id name username reportsTo reportsToName createdBy').lean();
@@ -1021,7 +2379,8 @@ router.delete('/:id', protect, async (req, res) => {
         });
       }
 
-      await Lead.findByIdAndDelete(id);
+      const priorState = lead.toObject();
+      await Lead.findByIdAndDelete(lead._id);
 
       try {
         const localIdx = (fallbackStore.leads || []).findIndex(l => l._id.toString() === id.toString());
@@ -1029,12 +2388,20 @@ router.delete('/:id', protect, async (req, res) => {
           fallbackStore.leads.splice(localIdx, 1);
           fallbackStore.saveToFile();
         }
-      } catch (err) {
-        console.warn('Local lead delete notice:', err.message);
-      }
+      } catch (err) {}
+
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: lead._id,
+        action: 'DELETE',
+        operator: req.user,
+        prior_state: priorState,
+        delta: `Deleted lead ${priorState.leadId || ''} "${priorState.name}"`,
+        req,
+      });
 
       if (io) {
-        io.emit('leads:updated', { id, action: 'deleted' });
+        io.emit('leads:updated', { id: lead._id, action: 'deleted' });
       }
 
       return res.json({
@@ -1053,5 +2420,508 @@ router.delete('/:id', protect, async (req, res) => {
   }
 });
 
-module.exports = router;
+// @route   POST /api/leads/filter
+// @desc    Advanced Multi-Dimensional Filtrations Engine (Temporal, Categorical, Numeric, Full-Text)
+// @access  Private
+router.post('/filter', protect, async (req, res) => {
+  const startTime = Date.now();
+  try {
+    const { rules = [], logic = 'AND' } = req.body;
+    const isSuperAdmin = req.user && req.user.role === 'Super Admin';
 
+    let allLeads = [];
+    if (fallbackStore.isFallback) {
+      allLeads = [...(fallbackStore.leads || [])];
+      if (!isSuperAdmin) {
+        allLeads = allLeads.filter((l) => canUserAccessLead(req.user, l, fallbackStore.users || []));
+      }
+    } else {
+      if (isSuperAdmin) {
+        allLeads = await Lead.find({}).lean();
+      } else {
+        const allDbUsers = await User.find({}).select('_id name username reportsTo reportsToName createdBy').lean();
+        const fullLeads = await Lead.find({}).lean();
+        allLeads = fullLeads.filter((l) => canUserAccessLead(req.user, l, allDbUsers));
+      }
+    }
+
+    if (!Array.isArray(rules) || rules.length === 0) {
+      return res.json({
+        success: true,
+        count: allLeads.length,
+        executionTimeMs: Date.now() - startTime,
+        leads: allLeads,
+      });
+    }
+
+    const evaluateRule = (lead, rule) => {
+      const { field, operator, value, valueTo } = rule;
+      if (!field || !operator) return true;
+
+      let recordVal = lead[field];
+      if (field === 'pipeline_value' && (recordVal === undefined || recordVal === 0)) {
+        recordVal = lead.dealValue || lead.estimatedValue || 0;
+      }
+      if (field === 'lead_status' && !recordVal) {
+        recordVal = lead.status;
+      }
+
+      switch (operator) {
+        case 'BETWEEN': {
+          if (!recordVal || !value || !valueTo) return false;
+          const target = new Date(recordVal).getTime();
+          return target >= new Date(value).getTime() && target <= new Date(valueTo).getTime();
+        }
+        case 'GREATER_THAN': {
+          if (!recordVal || !value) return false;
+          return new Date(recordVal).getTime() > new Date(value).getTime();
+        }
+        case 'LESS_THAN': {
+          if (!recordVal || !value) return false;
+          return new Date(recordVal).getTime() < new Date(value).getTime();
+        }
+        case 'EQUALS': {
+          if (recordVal === undefined || recordVal === null) return false;
+          return String(recordVal).toLowerCase() === String(value).toLowerCase();
+        }
+        case 'IN': {
+          if (!Array.isArray(value)) {
+            const arr = String(value).split(',').map((s) => s.trim().toLowerCase());
+            return arr.includes(String(recordVal || '').toLowerCase());
+          }
+          return value.map((v) => String(v).toLowerCase()).includes(String(recordVal || '').toLowerCase());
+        }
+        case 'NOT IN': {
+          if (!Array.isArray(value)) {
+            const arr = String(value).split(',').map((s) => s.trim().toLowerCase());
+            return !arr.includes(String(recordVal || '').toLowerCase());
+          }
+          return !value.map((v) => String(v).toLowerCase()).includes(String(recordVal || '').toLowerCase());
+        }
+        case 'GT': {
+          return Number(recordVal || 0) > Number(value || 0);
+        }
+        case 'LT': {
+          return Number(recordVal || 0) < Number(value || 0);
+        }
+        case 'RANGE': {
+          const num = Number(recordVal || 0);
+          return num >= Number(value || 0) && num <= Number(valueTo || 0);
+        }
+        case 'FUZZY':
+        case 'WILDCARD':
+        case 'PHRASE MATCH': {
+          const query = String(value || '').toLowerCase();
+          const targetText = [
+            lead.name,
+            lead.contactPerson,
+            lead.company,
+            lead.email,
+            lead.phone,
+            lead.mobileNumber,
+            lead.notes,
+            lead.remarks,
+          ]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase();
+
+          return targetText.includes(query);
+        }
+        default:
+          return true;
+      }
+    };
+
+    const filteredLeads = allLeads.filter((lead) => {
+      if (logic === 'OR') {
+        return rules.some((rule) => evaluateRule(lead, rule));
+      }
+      return rules.every((rule) => evaluateRule(lead, rule));
+    });
+
+    res.json({
+      success: true,
+      count: filteredLeads.length,
+      executionTimeMs: Date.now() - startTime,
+      appliedRulesCount: rules.length,
+      logic,
+      leads: filteredLeads,
+    });
+  } catch (error) {
+    console.error('Filter engine error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Advanced filtration engine error',
+      error: error.message,
+    });
+  }
+});
+
+// @route   POST /api/leads/:id/disposition
+// @desc    Log disposition with Disposition Framework Matrix automated triggers
+// @access  Private
+router.post('/:id/disposition', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      disposition_code,
+      notes = '',
+      duration_seconds = 0,
+      next_followup_at = null,
+      custom_deal_value = null,
+    } = req.body;
+
+    if (!disposition_code || !VALID_DISPOSITIONS.includes(disposition_code)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid disposition_code. Must be one of: ${VALID_DISPOSITIONS.join(', ')}`,
+      });
+    }
+
+    const io = req.app.get('io');
+    const agentName = req.user?.name || 'Sales Representative';
+    const agentId = req.user?._id?.toString() || req.user?.id?.toString() || '';
+
+    let targetLead = null;
+    let priorState = null;
+
+    if (fallbackStore.isFallback) {
+      const idx = (fallbackStore.leads || []).findIndex((l) => l._id.toString() === id.toString() || l.lead_id === id || l.leadId === id);
+      if (idx === -1) {
+        return res.status(404).json({ success: false, message: 'Lead not found' });
+      }
+      targetLead = fallbackStore.leads[idx];
+      priorState = { ...targetLead };
+
+      if (!canUserAccessLead(req.user, targetLead, fallbackStore.users || [])) {
+        return res.status(403).json({ success: false, message: 'Forbidden: No permission to update disposition' });
+      }
+
+      targetLead.disposition_code = disposition_code;
+      targetLead.last_disposition_at = new Date();
+      targetLead.last_contacted_at = new Date();
+      targetLead.lastContactDate = new Date();
+      targetLead.sla_tier = 0;
+
+      if (!targetLead.disposition_history) targetLead.disposition_history = [];
+
+      let systemActionExecuted = '';
+
+      switch (disposition_code) {
+        case 'NO_ANSWER': {
+          targetLead.status = 'In Progress';
+          targetLead.lead_status = 'IN_PROGRESS';
+          targetLead.retry_count = (targetLead.retry_count || 0) + 1;
+          const followupDate = new Date(Date.now() + 120 * 60 * 1000);
+          targetLead.next_followup_at = followupDate;
+          targetLead.nextFollowUpDate = followupDate;
+          systemActionExecuted = `Increment retry count (${targetLead.retry_count}/5). Auto-rescheduled follow-up in +120 minutes.`;
+          break;
+        }
+
+        case 'BUSY': {
+          targetLead.status = 'In Progress';
+          targetLead.lead_status = 'IN_PROGRESS';
+          targetLead.retry_count = (targetLead.retry_count || 0) + 1;
+          const followupDate = new Date(Date.now() + 30 * 60 * 1000);
+          targetLead.next_followup_at = followupDate;
+          targetLead.nextFollowUpDate = followupDate;
+          systemActionExecuted = `Queued for auto-dialer retry pool in 30 minutes.`;
+          break;
+        }
+
+        case 'CALL_BACK': {
+          targetLead.status = 'Follow-Up';
+          targetLead.lead_status = 'IN_PROGRESS';
+          const scheduledTime = next_followup_at ? new Date(next_followup_at) : new Date(Date.now() + 24 * 60 * 60 * 1000);
+          targetLead.next_followup_at = scheduledTime;
+          targetLead.nextFollowUpDate = scheduledTime;
+          systemActionExecuted = `Injected to calendar schedule at ${scheduledTime.toISOString()}.`;
+          break;
+        }
+
+        case 'NOT_INTERESTED': {
+          targetLead.status = 'Not Interested';
+          targetLead.lead_status = 'LOST';
+          targetLead.suppression_status = true;
+          targetLead.next_followup_at = null;
+          targetLead.nextFollowUpDate = null;
+          systemActionExecuted = `Triggered suppression list update. Terminated outbound queuing rules.`;
+          break;
+        }
+
+        case 'QUALIFIED_OPPORTUNITY': {
+          targetLead.status = 'Qualified';
+          systemActionExecuted = `Marked lead as Qualified for opportunity conversion.`;
+          break;
+        }
+
+        default:
+          break;
+      }
+
+      targetLead.disposition_history.unshift({
+        disposition_code,
+        notes: notes.trim(),
+        agent_name: agentName,
+        agent_id: agentId,
+        duration_seconds: Number(duration_seconds) || 0,
+        next_followup_at: targetLead.next_followup_at,
+        retry_count: targetLead.retry_count || 0,
+        timestamp: new Date(),
+      });
+
+      targetLead.updatedAt = new Date();
+      fallbackStore.saveToFile();
+
+      await logAuditAction({
+        entity_type: 'Disposition',
+        entity_id: targetLead._id || targetLead.lead_id,
+        action: 'DISPOSITION_LOGGED',
+        operator: req.user,
+        prior_state: priorState,
+        updated_state: targetLead,
+        delta: `Logged disposition "${disposition_code}" by ${agentName}. Action: ${systemActionExecuted}`,
+        req,
+      });
+
+      if (io) {
+        io.emit('leads:updated', { lead: targetLead, action: 'disposition_logged' });
+        io.emit('disposition:logged', { leadId: targetLead._id, disposition_code, agentName });
+      }
+
+      return res.json({
+        success: true,
+        message: `Disposition "${disposition_code}" logged successfully.`,
+        systemActionExecuted,
+        lead: targetLead,
+      });
+    } else {
+      targetLead = await Lead.findById(id);
+      if (!targetLead) {
+        targetLead = await Lead.findOne({ $or: [{ lead_id: id }, { leadId: id }] });
+      }
+      if (!targetLead) {
+        return res.status(404).json({ success: false, message: 'Lead not found' });
+      }
+      priorState = targetLead.toObject();
+
+      const allDbUsers = await User.find({}).select('_id name username reportsTo reportsToName createdBy').lean();
+      if (!canUserAccessLead(req.user, targetLead, allDbUsers)) {
+        return res.status(403).json({ success: false, message: 'Forbidden: No permission to update disposition' });
+      }
+
+      targetLead.disposition_code = disposition_code;
+      targetLead.last_disposition_at = new Date();
+      targetLead.last_contacted_at = new Date();
+      targetLead.lastContactDate = new Date();
+      targetLead.sla_tier = 0;
+
+      let systemActionExecuted = '';
+
+      switch (disposition_code) {
+        case 'NO_ANSWER': {
+          targetLead.status = 'In Progress';
+          targetLead.lead_status = 'IN_PROGRESS';
+          targetLead.retry_count = (targetLead.retry_count || 0) + 1;
+          const followupDate = new Date(Date.now() + 120 * 60 * 1000);
+          targetLead.next_followup_at = followupDate;
+          targetLead.nextFollowUpDate = followupDate;
+          systemActionExecuted = `Increment retry count (${targetLead.retry_count}/5). Auto-rescheduled callback in +120 minutes.`;
+          break;
+        }
+
+        case 'BUSY': {
+          targetLead.status = 'In Progress';
+          targetLead.lead_status = 'IN_PROGRESS';
+          targetLead.retry_count = (targetLead.retry_count || 0) + 1;
+          const followupDate = new Date(Date.now() + 30 * 60 * 1000);
+          targetLead.next_followup_at = followupDate;
+          targetLead.nextFollowUpDate = followupDate;
+          systemActionExecuted = `Queued for auto-dialer retry pool in 30 minutes.`;
+          break;
+        }
+
+        case 'CALL_BACK': {
+          targetLead.status = 'Follow-Up';
+          targetLead.lead_status = 'IN_PROGRESS';
+          const scheduledTime = next_followup_at ? new Date(next_followup_at) : new Date(Date.now() + 24 * 60 * 60 * 1000);
+          targetLead.next_followup_at = scheduledTime;
+          targetLead.nextFollowUpDate = scheduledTime;
+          systemActionExecuted = `Injected to calendar schedule at ${scheduledTime.toISOString()}.`;
+          break;
+        }
+
+        case 'NOT_INTERESTED': {
+          targetLead.status = 'Not Interested';
+          targetLead.lead_status = 'LOST';
+          targetLead.suppression_status = true;
+          targetLead.next_followup_at = null;
+          targetLead.nextFollowUpDate = null;
+          systemActionExecuted = `Triggered suppression list update. Terminated outbound queuing rules.`;
+          break;
+        }
+
+        case 'QUALIFIED_OPPORTUNITY': {
+          targetLead.status = 'Qualified';
+          systemActionExecuted = `Marked lead as Qualified for opportunity conversion.`;
+          break;
+        }
+
+        default:
+          break;
+      }
+
+      targetLead.disposition_history.unshift({
+        disposition_code,
+        notes: notes.trim(),
+        agent_name: agentName,
+        agent_id: agentId,
+        duration_seconds: Number(duration_seconds) || 0,
+        next_followup_at: targetLead.next_followup_at,
+        retry_count: targetLead.retry_count || 0,
+        timestamp: new Date(),
+      });
+
+      targetLead.updatedAt = new Date();
+      await targetLead.save();
+
+      try {
+        const localIdx = (fallbackStore.leads || []).findIndex((l) => l._id.toString() === targetLead._id.toString());
+        if (localIdx >= 0) {
+          fallbackStore.leads[localIdx] = targetLead.toObject();
+          fallbackStore.saveToFile();
+        }
+      } catch (e) {}
+
+      await logAuditAction({
+        entity_type: 'Disposition',
+        entity_id: targetLead._id,
+        action: 'DISPOSITION_LOGGED',
+        operator: req.user,
+        prior_state: priorState,
+        updated_state: targetLead.toObject(),
+        delta: `Logged disposition "${disposition_code}" by ${agentName}. Action: ${systemActionExecuted}`,
+        req,
+      });
+
+      if (io) {
+        io.emit('leads:updated', { lead: targetLead.toObject(), action: 'disposition_logged' });
+        io.emit('disposition:logged', { leadId: targetLead._id, disposition_code, agentName });
+      }
+
+      return res.json({
+        success: true,
+        message: `Disposition "${disposition_code}" logged successfully.`,
+        systemActionExecuted,
+        lead: targetLead,
+      });
+    }
+  } catch (error) {
+    console.error('Disposition logging error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to log disposition',
+      error: error.message,
+    });
+  }
+});
+
+// @route   POST /api/leads/:id/claim
+// @desc    Claim an unassigned high-priority lead from shared queue
+// @access  Private
+router.post('/:id/claim', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const io = req.app.get('io');
+    const claimerName = req.user?.name || 'Sales Representative';
+    const claimerId = req.user?._id || req.user?.id;
+
+    let targetLead = null;
+    let priorState = null;
+
+    if (fallbackStore.isFallback) {
+      const idx = (fallbackStore.leads || []).findIndex((l) => l._id.toString() === id.toString() || l.lead_id === id || l.leadId === id);
+      if (idx === -1) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+      targetLead = fallbackStore.leads[idx];
+      priorState = { ...targetLead };
+
+      targetLead.assignedTo = claimerName;
+      targetLead.assignedSalesUser = claimerName;
+      targetLead.user = claimerId;
+      targetLead.is_high_priority_pool = false;
+      targetLead.sla_unassigned = false;
+      targetLead.sla_tier = 0;
+      targetLead.status = 'In Progress';
+      targetLead.lead_status = 'IN_PROGRESS';
+      targetLead.updatedAt = new Date();
+
+      fallbackStore.saveToFile();
+
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: targetLead._id,
+        action: 'LEAD_CLAIMED',
+        operator: req.user,
+        prior_state: priorState,
+        updated_state: targetLead,
+        delta: `Lead claimed by ${claimerName} from High-Priority Shared Queue`,
+        req,
+      });
+
+      if (io) {
+        io.emit('leads:updated', { lead: targetLead, action: 'claimed' });
+      }
+
+      return res.json({
+        success: true,
+        message: `Lead successfully claimed by ${claimerName}`,
+        lead: targetLead,
+      });
+    } else {
+      targetLead = await Lead.findById(id);
+      if (!targetLead) targetLead = await Lead.findOne({ $or: [{ lead_id: id }, { leadId: id }] });
+      if (!targetLead) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+      priorState = targetLead.toObject();
+      targetLead.assignedTo = claimerName;
+      targetLead.assignedSalesUser = claimerName;
+      targetLead.user = claimerId;
+      targetLead.is_high_priority_pool = false;
+      targetLead.sla_unassigned = false;
+      targetLead.sla_tier = 0;
+      targetLead.status = 'In Progress';
+      targetLead.lead_status = 'IN_PROGRESS';
+      targetLead.updatedAt = new Date();
+      await targetLead.save();
+
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: targetLead._id,
+        action: 'LEAD_CLAIMED',
+        operator: req.user,
+        prior_state: priorState,
+        updated_state: targetLead.toObject(),
+        delta: `Lead claimed by ${claimerName} from High-Priority Shared Queue`,
+        req,
+      });
+
+      if (io) {
+        io.emit('leads:updated', { lead: targetLead.toObject(), action: 'claimed' });
+      }
+
+      return res.json({
+        success: true,
+        message: `Lead successfully claimed by ${claimerName}`,
+        lead: targetLead,
+      });
+    }
+  } catch (err) {
+    console.error('Claim lead error:', err);
+    res.status(500).json({ success: false, message: 'Failed to claim lead', error: err.message });
+  }
+});
+
+module.exports = router;

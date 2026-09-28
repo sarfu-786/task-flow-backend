@@ -261,10 +261,12 @@ router.get('/', protect, async (req, res) => {
     let targetRootId = null;
 
     if (!isSuperAdmin) {
-      // Non-Super Admin (Managers / Staff) can view their subtree as root
+      // Non-Super Admin users (Managers & Staff) can ONLY view the hierarchy of users who are under them
       targetRootId = currentUserIdStr;
     } else if (managerId) {
       targetRootId = managerId;
+    } else if (req.query.scope === 'mine') {
+      targetRootId = currentUserIdStr;
     }
 
     const tree = buildHierarchyTree(allUsers, allTasks, targetRootId);
@@ -346,25 +348,53 @@ router.get('/', protect, async (req, res) => {
       }
     }
 
+    // Scope visible users and tasks for non-Super Admins
+    let visibleUsers = allUsers;
+    let visibleTasks = allTasks;
+
+    if (!isSuperAdmin && tree) {
+      const treeUserIds = new Set();
+      const collectIds = (node) => {
+        if (!node) return;
+        if (node._id) treeUserIds.add(node._id.toString());
+        if (Array.isArray(node.children)) {
+          node.children.forEach(collectIds);
+        }
+      };
+      collectIds(tree);
+      visibleUsers = allUsers.filter((u) => u._id && treeUserIds.has(u._id.toString()));
+      visibleTasks = allTasks.filter((t) => {
+        const tUser = t.user ? (t.user._id ? t.user._id.toString() : t.user.toString()) : '';
+        const tAssigned = (t.assignedTo || '').toLowerCase().trim();
+        const matchesUser = treeUserIds.has(tUser);
+        const matchesName = visibleUsers.some(
+          (u) =>
+            (u.name && u.name.toLowerCase().trim() === tAssigned) ||
+            (u.username && u.username.toLowerCase().trim() === tAssigned)
+        );
+        return matchesUser || matchesName;
+      });
+    }
+
     // Department Stats
     const departmentMap = new Map();
-    allUsers.forEach((u) => {
+    visibleUsers.forEach((u) => {
       const dept = u.department || 'Operations';
       departmentMap.set(dept, (departmentMap.get(dept) || 0) + 1);
     });
     const departmentStats = Array.from(departmentMap.entries()).map(([name, count]) => ({ name, count }));
 
     // Overall Tasks Stats
-    const completedTasksCount = allTasks.filter((t) => t && t.status === 'Completed').length;
-    const inProgressTasksCount = allTasks.filter((t) => t && t.status === 'In Progress').length;
-    const todoTasksCount = allTasks.filter((t) => t && (t.status === 'To Do' || !t.status)).length;
+    const completedTasksCount = visibleTasks.filter((t) => t && t.status === 'Completed').length;
+    const inProgressTasksCount = visibleTasks.filter((t) => t && t.status === 'In Progress').length;
+    const todoTasksCount = visibleTasks.filter((t) => t && (t.status === 'To Do' || !t.status)).length;
 
     return res.json({
       success: true,
-      totalEmployees: allUsers.length,
-      totalManagers: allUsers.filter((u) => u.role === 'Manager' || u.role === 'Super Admin' || u.role === 'Executive' || u.role === 'Administrator').length,
-      totalUsers: allUsers.filter((u) => u.role === 'User' || !u.role || (u.role !== 'Manager' && u.role !== 'Super Admin' && u.role !== 'Executive' && u.role !== 'Administrator')).length,
-      totalTasks: allTasks.length,
+      totalEmployees: visibleUsers.length,
+      totalManagers: visibleUsers.filter((u) => u.role === 'Manager' || u.role === 'Super Admin' || u.role === 'Executive' || u.role === 'Administrator').length,
+      totalUsers: visibleUsers.filter((u) => u.role === 'User' || !u.role || (u.role !== 'Manager' && u.role !== 'Super Admin' && u.role !== 'Executive' && u.role !== 'Administrator')).length,
+      totalTasks: visibleTasks.length,
       completedTasks: completedTasksCount,
       inProgressTasks: inProgressTasksCount,
       todoTasks: todoTasksCount,

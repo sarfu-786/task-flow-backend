@@ -10,8 +10,22 @@ const { fallbackStore } = require('../config/db');
 const VALID_TASK_TYPES = ['internet work', 'documentation', 'social media', 'backend work', 'sells', 'sales'];
 const VALID_STATUSES = ['To Do', 'In Progress', 'Completed'];
 
-// Safe regex character escaper
-const escapeRegex = (str) => (str ? str.toString().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '');
+const {
+  getAllUsers,
+  getUserScopeContext,
+  isTaskAccessible,
+  getSubordinateUserIds,
+  escapeRegex,
+} = require('../services/hierarchyService');
+
+/**
+ * Checks if a user has permission to access (view, edit, delete, complete) a specific task
+ */
+const canUserAccessTask = (currentUser, task, allUsers = []) => {
+  if (!currentUser || !task) return false;
+  const scope = getUserScopeContext(currentUser, allUsers);
+  return isTaskAccessible(scope, task);
+};
 
 // Helper to create Notification when a task is completed or remarked
 // The completion report is dispatched directly to the assigner who assigned the task
@@ -195,51 +209,7 @@ const createUserAssignmentNotification = async (task, targetAssignedTo, targetUs
   }
 };
 
-/**
- * Helper to get all user IDs that are subordinate to (under) the assigner in hierarchy
- * Performs a BFS traversal down the hierarchy tree (reportsTo / createdBy / reportsToName)
- */
-const getSubordinateUserIds = (assignerUser, allUsers) => {
-  if (!assignerUser || !allUsers || !Array.isArray(allUsers)) return new Set();
-  const assignerId = (assignerUser._id ? assignerUser._id.toString() : (assignerUser.id ? assignerUser.id.toString() : '')).trim();
-  const assignerName = (assignerUser.name || '').toLowerCase().trim();
 
-  const subordinateIds = new Set();
-  if (!assignerId && !assignerName) return subordinateIds;
-
-  const queue = [assignerId];
-  const processed = new Set([assignerId]);
-
-  while (queue.length > 0) {
-    const currentParentId = queue.shift();
-    const parentUser = allUsers.find((u) => u && u._id && u._id.toString() === currentParentId);
-    const parentName = (parentUser?.name || (currentParentId === assignerId ? assignerName : '')).toLowerCase().trim();
-
-    for (const u of allUsers) {
-      if (!u || !u._id) continue;
-      const uIdStr = u._id.toString();
-      if (uIdStr === assignerId || processed.has(uIdStr)) continue;
-
-      const repIdStr = u.reportsTo ? (u.reportsTo._id ? u.reportsTo._id.toString() : u.reportsTo.toString()) : '';
-      const repNameStr = (u.reportsToName || '').toLowerCase().trim();
-      const createdByStr = u.createdBy ? (u.createdBy._id ? u.createdBy._id.toString() : u.createdBy.toString()) : '';
-
-      const isDirectReport =
-        (currentParentId && repIdStr === currentParentId) ||
-        (parentName && repNameStr && (repNameStr.includes(parentName) || parentName.includes(repNameStr)));
-
-      const isCreatedByParent = currentParentId && createdByStr === currentParentId;
-
-      if (isDirectReport || isCreatedByParent) {
-        subordinateIds.add(uIdStr);
-        processed.add(uIdStr);
-        queue.push(uIdStr);
-      }
-    }
-  }
-
-  return subordinateIds;
-};
 
 /**
  * Validates organizational hierarchy task assignment rules:
@@ -466,26 +436,27 @@ router.get('/', protect, async (req, res) => {
           ...subordinates.map((s) => s.username),
         ].filter(Boolean);
         const subordinateIds = Array.from(subordinateIdsSet);
+        const names = [userName, userUsername, ...subordinateNames].filter(Boolean);
 
-        if (teamOnly === 'true') {
-          const names = [userName, userUsername, ...subordinateNames].filter(Boolean);
-          queryObj.$or = [
-            { assignedTo: { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) } },
-            { user: { $in: [req.user._id, ...subordinateIds] } },
-          ];
-        } else if (myTasksOnly === 'true' || (!isManager && !assignedTo)) {
-          const names = [userName, userUsername, ...subordinateNames].filter(Boolean);
-          const orConditions = [
-            { assignedTo: { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) } },
-            { user: { $in: [req.user._id, ...subordinateIds] } },
-            { assignedBy: new RegExp(escapeRegex(userName), 'i') },
-          ];
-          queryObj.$or = orConditions;
-        } else if (assignedTo && assignedTo !== 'all') {
-          queryObj.assignedTo = new RegExp('^' + escapeRegex(assignedTo.trim()) + '$', 'i');
+        const hierarchyOr = [
+          { assignedTo: { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) } },
+          { user: { $in: [req.user._id, ...subordinateIds] } },
+          { assignedBy: new RegExp(escapeRegex(userName), 'i') },
+        ];
+
+        queryObj.$or = hierarchyOr;
+      }
+
+      if (assignedTo && assignedTo !== 'all') {
+        const assignedCond = [{ assignedTo: new RegExp('^' + escapeRegex(assignedTo.trim()) + '$', 'i') }];
+        if (queryObj.$or) {
+          queryObj.$and = [{ $or: queryObj.$or }, { $or: assignedCond }];
+          delete queryObj.$or;
+        } else if (queryObj.$and) {
+          queryObj.$and.push({ $or: assignedCond });
+        } else {
+          queryObj.$or = assignedCond;
         }
-      } else if (assignedTo && assignedTo !== 'all') {
-        queryObj.assignedTo = new RegExp('^' + escapeRegex(assignedTo.trim()) + '$', 'i');
       }
 
       if (search && search.trim() !== '') {

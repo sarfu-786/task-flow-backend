@@ -337,7 +337,7 @@ const findUserResiliently = async (identifier) => {
         return true;
       }
       // Super Admin Aliases
-      if (['superadmin', 'super', 'owner', 'sarfraj', 'sarfaraj', 'sarfarajahmad'].includes(cleanAlphanumeric)) {
+      if (['superadmin', 'super', 'owner', 'sarfraj', 'sarfaraj', 'sarfarajahmad'].includes(cleanAlphanumeric) && (u.role === 'Super Admin' || u.username === 'sarfraj' || (u.name && u.name.toLowerCase().includes('sarfaraj')))) {
         return true;
       }
       // Manager Aliases

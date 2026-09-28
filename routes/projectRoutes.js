@@ -30,90 +30,20 @@ const generateProjectCode = (existingProjects = []) => {
   return `PRJ-${count < 10 ? '0' + count : count}-${rand}`;
 };
 
-/**
- * Helper to get all user IDs that are subordinate to (under) the current user in hierarchy
- */
-const getSubordinateUserIds = (assignerUser, allUsers) => {
-  if (!assignerUser || !allUsers || !Array.isArray(allUsers)) return new Set();
-  const assignerId = (assignerUser._id ? assignerUser._id.toString() : (assignerUser.id ? assignerUser.id.toString() : '')).trim();
-  const assignerName = (assignerUser.name || '').toLowerCase().trim();
-
-  const subordinateIds = new Set();
-  if (!assignerId && !assignerName) return subordinateIds;
-
-  const queue = [assignerId];
-  const processed = new Set([assignerId]);
-
-  while (queue.length > 0) {
-    const currentParentId = queue.shift();
-    const parentUser = allUsers.find((u) => u && u._id && u._id.toString() === currentParentId);
-    const parentName = (parentUser?.name || (currentParentId === assignerId ? assignerName : '')).toLowerCase().trim();
-
-    for (const u of allUsers) {
-      if (!u || !u._id) continue;
-      const uIdStr = u._id.toString();
-      if (uIdStr === assignerId || processed.has(uIdStr)) continue;
-
-      const repIdStr = u.reportsTo ? (u.reportsTo._id ? u.reportsTo._id.toString() : u.reportsTo.toString()) : '';
-      const repNameStr = (u.reportsToName || '').toLowerCase().trim();
-      const createdByStr = u.createdBy ? (u.createdBy._id ? u.createdBy._id.toString() : u.createdBy.toString()) : '';
-
-      const isDirectReport =
-        (currentParentId && repIdStr === currentParentId) ||
-        (parentName && repNameStr && (repNameStr.includes(parentName) || parentName.includes(repNameStr)));
-
-      const isCreatedByParent = currentParentId && createdByStr === currentParentId;
-
-      if (isDirectReport || isCreatedByParent) {
-        subordinateIds.add(uIdStr);
-        processed.add(uIdStr);
-        queue.push(uIdStr);
-      }
-    }
-  }
-
-  return subordinateIds;
-};
+const {
+  getAllUsers,
+  getUserScopeContext,
+  isProjectAccessible,
+  getSubordinateUserIds,
+} = require('../services/hierarchyService');
 
 /**
  * Checks if a user can access a project (Super Admin = all, Manager = team/subordinates + self, User = subordinates + self)
  */
-const canUserAccessProject = (currentUser, project, allUsers) => {
+const canUserAccessProject = (currentUser, project, allUsers = []) => {
   if (!currentUser || !project) return false;
-  const userRoles = Array.isArray(currentUser.roles) && currentUser.roles.length > 0 ? currentUser.roles : [currentUser.role || 'User'];
-  if (userRoles.includes('Super Admin')) return true;
-
-  const currentUserId = (currentUser._id ? currentUser._id.toString() : (currentUser.id ? currentUser.id.toString() : '')).trim();
-  const currentUserName = (currentUser.name || '').toLowerCase().trim();
-  const currentUserUsername = (currentUser.username || '').toLowerCase().trim();
-
-  const subordinateIdsSet = getSubordinateUserIds(currentUser, allUsers);
-  const subordinateUsers = (allUsers || []).filter((u) => u && u._id && subordinateIdsSet.has(u._id.toString()));
-  const subordinateNames = subordinateUsers.map((u) => (u.name || '').toLowerCase().trim());
-  const subordinateUsernames = subordinateUsers.map((u) => (u.username || '').toLowerCase().trim());
-  const subordinateIds = Array.from(subordinateIdsSet);
-
-  const allowedIds = new Set([currentUserId, ...subordinateIds]);
-  const allowedNames = new Set([currentUserName, currentUserUsername, ...subordinateNames, ...subordinateUsernames].filter(Boolean));
-
-  // Check Manager
-  const pManagerId = project.manager ? (project.manager._id ? project.manager._id.toString() : project.manager.toString()) : '';
-  const pManagerName = (project.managerName || '').toLowerCase().trim();
-  if (pManagerId && allowedIds.has(pManagerId)) return true;
-  if (pManagerName && allowedNames.has(pManagerName)) return true;
-
-  // Check CreatedBy
-  const pCreatedById = project.createdBy ? (project.createdBy._id ? project.createdBy._id.toString() : project.createdBy.toString()) : '';
-  if (pCreatedById && allowedIds.has(pCreatedById)) return true;
-
-  // Check Team Members
-  const isTeamMatch = (project.teamMembers || []).some((m) => {
-    const mUserId = m.userId ? (m.userId._id ? m.userId._id.toString() : m.userId.toString()) : (m.user ? (m.user._id ? m.user._id.toString() : m.user.toString()) : '');
-    const mName = (m.name || m.userName || '').toLowerCase().trim();
-    return (mUserId && allowedIds.has(mUserId)) || (mName && allowedNames.has(mName));
-  });
-
-  return isTeamMatch;
+  const scope = getUserScopeContext(currentUser, allUsers);
+  return isProjectAccessible(scope, project);
 };
 
 // @route   GET /api/projects

@@ -71,88 +71,22 @@ const getComputedSlaStatus = (complaint) => {
   return 'On Track';
 };
 
-/**
- * Helper to get all user IDs that are subordinate to (under) the current user in hierarchy
- */
-const getSubordinateUserIds = (assignerUser, allUsers) => {
-  if (!assignerUser || !allUsers || !Array.isArray(allUsers)) return new Set();
-  const assignerId = (assignerUser._id ? assignerUser._id.toString() : (assignerUser.id ? assignerUser.id.toString() : '')).trim();
-  const assignerName = (assignerUser.name || '').toLowerCase().trim();
-
-  const subordinateIds = new Set();
-  if (!assignerId && !assignerName) return subordinateIds;
-
-  const queue = [assignerId];
-  const processed = new Set([assignerId]);
-
-  while (queue.length > 0) {
-    const currentParentId = queue.shift();
-    const parentUser = allUsers.find((u) => u && u._id && u._id.toString() === currentParentId);
-    const parentName = (parentUser?.name || (currentParentId === assignerId ? assignerName : '')).toLowerCase().trim();
-
-    for (const u of allUsers) {
-      if (!u || !u._id) continue;
-      const uIdStr = u._id.toString();
-      if (uIdStr === assignerId || processed.has(uIdStr)) continue;
-
-      const repIdStr = u.reportsTo ? (u.reportsTo._id ? u.reportsTo._id.toString() : u.reportsTo.toString()) : '';
-      const repNameStr = (u.reportsToName || '').toLowerCase().trim();
-      const createdByStr = u.createdBy ? (u.createdBy._id ? u.createdBy._id.toString() : u.createdBy.toString()) : '';
-
-      const isDirectReport =
-        (currentParentId && repIdStr === currentParentId) ||
-        (parentName && repNameStr && (repNameStr.includes(parentName) || parentName.includes(repNameStr)));
-
-      const isCreatedByParent = currentParentId && createdByStr === currentParentId;
-
-      if (isDirectReport || isCreatedByParent) {
-        subordinateIds.add(uIdStr);
-        processed.add(uIdStr);
-        queue.push(uIdStr);
-      }
-    }
-  }
-
-  return subordinateIds;
-};
+const {
+  getAllUsers,
+  getUserScopeContext,
+  isComplaintAccessible,
+  getSubordinateUserIds,
+} = require('../services/hierarchyService');
 
 /**
- * Checks if a user can access a complaint (Super Admin / Service Coordinator / Manager / Executive = all, User = unassigned + subordinates + self)
+ * Checks if a user can access a complaint:
+ * - Super Admin: has access to ALL complaints across the entire organization.
+ * - Manager / User: ONLY has access to complaints belonging to self or their subordinates in hierarchy.
  */
-const canUserAccessComplaint = (currentUser, complaint, allUsers) => {
+const canUserAccessComplaint = (currentUser, complaint, allUsers = []) => {
   if (!currentUser || !complaint) return false;
-  const userRoles = Array.isArray(currentUser.roles) && currentUser.roles.length > 0 ? currentUser.roles : [currentUser.role || 'User'];
-  if (userRoles.some((r) => ['Super Admin', 'Service Coordinator', 'Manager', 'Administrator', 'Executive'].includes(r))) {
-    return true;
-  }
-
-  const currentUserId = (currentUser._id ? currentUser._id.toString() : (currentUser.id ? currentUser.id.toString() : '')).trim();
-  const currentUserName = (currentUser.name || '').toLowerCase().trim();
-  const currentUserUsername = (currentUser.username || '').toLowerCase().trim();
-
-  const subordinateIdsSet = getSubordinateUserIds(currentUser, allUsers);
-  const subordinateUsers = (allUsers || []).filter((u) => u && u._id && subordinateIdsSet.has(u._id.toString()));
-  const subordinateNames = subordinateUsers.map((u) => (u.name || '').toLowerCase().trim());
-  const subordinateUsernames = subordinateUsers.map((u) => (u.username || '').toLowerCase().trim());
-  const subordinateIds = Array.from(subordinateIdsSet);
-
-  const allowedIds = new Set([currentUserId, ...subordinateIds]);
-  const allowedNames = new Set([currentUserName, currentUserUsername, ...subordinateNames, ...subordinateUsernames].filter(Boolean));
-
-  // Check Assigned To - unassigned tickets are visible to staff
-  const cAssignedId = complaint.assignedTo ? (complaint.assignedTo._id ? complaint.assignedTo._id.toString() : complaint.assignedTo.toString()) : '';
-  const cAssignedName = (complaint.assignedToName || '').toLowerCase().trim();
-  if (!cAssignedId || cAssignedName === 'unassigned' || allowedIds.has(cAssignedId) || allowedNames.has(cAssignedName)) {
-    return true;
-  }
-
-  // Check Created By
-  const cCreatedById = complaint.createdBy ? (complaint.createdBy._id ? complaint.createdBy._id.toString() : complaint.createdBy.toString()) : '';
-  const cCreatedByName = (complaint.createdByName || '').toLowerCase().trim();
-  if (cCreatedById && allowedIds.has(cCreatedById)) return true;
-  if (cCreatedByName && allowedNames.has(cCreatedByName)) return true;
-
-  return false;
+  const scope = getUserScopeContext(currentUser, allUsers);
+  return isComplaintAccessible(scope, complaint);
 };
 
 // @route   GET /api/complaints
@@ -175,15 +109,12 @@ router.get('/', protect, requireComplaintModule, async (req, res) => {
     const pageLimit = Math.max(1, parseInt(limit, 10));
 
     let complaintsList = [];
-    let allUsers = [];
 
     if (fallbackStore.isFallback) {
       complaintsList = [...(fallbackStore.complaints || [])];
-      allUsers = fallbackStore.users || [];
     } else {
       const dbComplaints = await Complaint.find({}).sort({ createdAt: -1 });
       complaintsList = dbComplaints.map((c) => c.toObject());
-      allUsers = await User.find({}).select('_id name username email role reportsTo reportsToName createdBy').lean();
     }
 
     // Refresh dynamic SLA status
@@ -192,14 +123,15 @@ router.get('/', protect, requireComplaintModule, async (req, res) => {
       slaStatus: getComputedSlaStatus(c),
     }));
 
-    // User permissions & scoping: Super Admin, Service Coordinators, Managers get all
-    const user = req.user;
-    const userRoles = Array.isArray(user.roles) && user.roles.length > 0 ? user.roles : [user.role || 'User'];
-    const hasOrgAccess = userRoles.some((r) => ['Super Admin', 'Service Coordinator', 'Manager', 'Administrator', 'Executive'].includes(r));
-
-    if (!hasOrgAccess) {
-      complaintsList = complaintsList.filter((c) => canUserAccessComplaint(user, c, allUsers));
-    }
+    // Permissions & scoping:
+    // Only Super Admin has access to entire complaint and all details about complaints.
+    // Regular users ONLY see complaints assigned to them.
+    // Permissions & scoping:
+    // Super Admin has access to all complaints across the entire organization.
+    // Managers & Users ONLY see complaints assigned to/created by self or subordinates in hierarchy.
+    const allUsers = await getAllUsers();
+    const scope = getUserScopeContext(req.user, allUsers);
+    complaintsList = complaintsList.filter((c) => isComplaintAccessible(scope, c));
 
     // Global Stats before filters
     const stats = {
@@ -282,13 +214,11 @@ router.get('/', protect, requireComplaintModule, async (req, res) => {
 router.get('/:id', protect, requireComplaintModule, async (req, res) => {
   try {
     let complaint;
-    let allUsers = [];
+    let allUsers = await getAllUsers();
     if (fallbackStore.isFallback) {
       complaint = (fallbackStore.complaints || []).find((c) => c._id.toString() === req.params.id);
-      allUsers = fallbackStore.users || [];
     } else {
       complaint = await Complaint.findById(req.params.id);
-      allUsers = await User.find({}).select('_id name username email role reportsTo reportsToName createdBy').lean();
     }
 
     if (!complaint) {
@@ -299,7 +229,10 @@ router.get('/:id', protect, requireComplaintModule, async (req, res) => {
     complaintObj.slaStatus = getComputedSlaStatus(complaintObj);
 
     if (!canUserAccessComplaint(req.user, complaintObj, allUsers)) {
-      return res.status(403).json({ success: false, message: 'You do not have access to this complaint ticket' });
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied: You can only view complaints belonging to yourself or your subordinate hierarchy.',
+      });
     }
 
     return res.json({ success: true, complaint: complaintObj });
@@ -438,13 +371,7 @@ router.put('/:id', protect, requireComplaintModule, async (req, res) => {
       csatRating,
     } = req.body;
 
-    let allUsers = [];
-    if (fallbackStore.isFallback) {
-      allUsers = fallbackStore.users || [];
-    } else {
-      allUsers = await User.find({}).select('_id name username email role reportsTo reportsToName createdBy').lean();
-    }
-
+    let allUsers = await getAllUsers();
     let updatedComplaint;
 
     if (fallbackStore.isFallback) {
@@ -455,7 +382,10 @@ router.put('/:id', protect, requireComplaintModule, async (req, res) => {
 
       const existing = fallbackStore.complaints[index];
       if (!canUserAccessComplaint(req.user, existing, allUsers)) {
-        return res.status(403).json({ success: false, message: 'You do not have permission to edit this complaint ticket' });
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied: You can only edit complaints assigned to you or your subordinates.',
+        });
       }
 
       const newStatus = status || existing.status;
@@ -496,7 +426,10 @@ router.put('/:id', protect, requireComplaintModule, async (req, res) => {
       }
 
       if (!canUserAccessComplaint(req.user, complaint.toObject(), allUsers)) {
-        return res.status(403).json({ success: false, message: 'You do not have permission to edit this complaint ticket' });
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied: You can only edit complaints assigned to you or your subordinates.',
+        });
       }
 
       if (subject !== undefined) complaint.subject = subject;
@@ -548,13 +481,7 @@ router.put('/:id/resolve', protect, requireComplaintModule, async (req, res) => 
   try {
     const { resolutionNotes = '', rootCause = '', csatRating = 5 } = req.body;
 
-    let allUsers = [];
-    if (fallbackStore.isFallback) {
-      allUsers = fallbackStore.users || [];
-    } else {
-      allUsers = await User.find({}).select('_id name username email role reportsTo reportsToName createdBy').lean();
-    }
-
+    let allUsers = await getAllUsers();
     let updatedComplaint;
     const resolvedAt = new Date().toISOString();
 
@@ -566,7 +493,10 @@ router.put('/:id/resolve', protect, requireComplaintModule, async (req, res) => 
 
       const existing = fallbackStore.complaints[index];
       if (!canUserAccessComplaint(req.user, existing, allUsers)) {
-        return res.status(403).json({ success: false, message: 'You do not have permission to resolve this complaint ticket' });
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied: You can only resolve complaints assigned to you or your subordinates.',
+        });
       }
 
       const updated = {
@@ -589,7 +519,10 @@ router.put('/:id/resolve', protect, requireComplaintModule, async (req, res) => 
       }
 
       if (!canUserAccessComplaint(req.user, complaint.toObject(), allUsers)) {
-        return res.status(403).json({ success: false, message: 'You do not have permission to resolve this complaint ticket' });
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied: You can only resolve complaints assigned to you or your subordinates.',
+        });
       }
 
       complaint.status = 'Resolved';
@@ -625,20 +558,25 @@ router.put('/:id/resolve', protect, requireComplaintModule, async (req, res) => 
 
 // @route   DELETE /api/complaints/:id
 // @desc    Delete complaint ticket
-// @access  Private (Super Admin / Manager / Creator)
+// @access  Private (Super Admin)
 router.delete('/:id', protect, requireComplaintModule, async (req, res) => {
   try {
+    const userRoles = Array.isArray(req.user.roles) && req.user.roles.length > 0 ? req.user.roles : [req.user.role || 'User'];
+    const isSuperAdmin = userRoles.some((r) => r === 'Super Admin' || r === 'superadmin') || req.user.role === 'Super Admin';
+
+    if (!isSuperAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied: Only Super Admin has permission to delete complaint tickets.',
+      });
+    }
+
     let deleted;
-    let allUsers = [];
 
     if (fallbackStore.isFallback) {
-      allUsers = fallbackStore.users || [];
       const complaint = (fallbackStore.complaints || []).find((c) => c._id.toString() === req.params.id);
       if (!complaint) {
         return res.status(404).json({ success: false, message: 'Complaint not found' });
-      }
-      if (!canUserAccessComplaint(req.user, complaint, allUsers)) {
-        return res.status(403).json({ success: false, message: 'You do not have permission to delete this complaint ticket' });
       }
 
       const initialLen = (fallbackStore.complaints || []).length;
@@ -648,13 +586,9 @@ router.delete('/:id', protect, requireComplaintModule, async (req, res) => {
         fallbackStore.saveToFile();
       }
     } else {
-      allUsers = await User.find({}).select('_id name username email role reportsTo reportsToName createdBy').lean();
       const complaint = await Complaint.findById(req.params.id);
       if (!complaint) {
         return res.status(404).json({ success: false, message: 'Complaint not found' });
-      }
-      if (!canUserAccessComplaint(req.user, complaint.toObject(), allUsers)) {
-        return res.status(403).json({ success: false, message: 'You do not have permission to delete this complaint ticket' });
       }
 
       const resDel = await Complaint.findByIdAndDelete(req.params.id);

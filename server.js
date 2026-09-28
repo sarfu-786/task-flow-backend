@@ -94,6 +94,11 @@ app.use('/api/complaints', require('./routes/complaintRoutes'));
 app.use('/api/projects', require('./routes/projectRoutes'));
 app.use('/api/subscriptions', require('./routes/subscriptionRoutes'));
 app.use('/api/subscription', require('./routes/subscriptionRoutes'));
+app.use('/api/mis', require('./routes/misRoutes'));
+app.use('/api/audit-logs', require('./routes/auditRoutes'));
+app.use('/api/followups', require('./routes/followUpRoutes'));
+
+const { initSLADaemon } = require('./services/slaDaemon');
 
 const mongoose = require('mongoose');
 
@@ -148,6 +153,9 @@ const startServer = async () => {
       Project,
       Subscription
     );
+
+    // Initialize SLA Escalation Daemon
+    initSLADaemon(io);
 
     httpServer.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
