@@ -37,8 +37,36 @@ const opportunitySchema = new mongoose.Schema({
     default: '',
   },
 
+  // Contact details retained from converted Lead
+  contactPerson: {
+    type: String,
+    trim: true,
+    default: '',
+  },
+  email: {
+    type: String,
+    trim: true,
+    lowercase: true,
+    default: '',
+  },
+  phone: {
+    type: String,
+    trim: true,
+    default: '',
+  },
+  leadSource: {
+    type: String,
+    trim: true,
+    default: 'Website',
+  },
+
   // Bidirectional link to Source Lead
   leadId: {
+    type: String,
+    default: '',
+    index: true,
+  },
+  originalLeadId: {
     type: String,
     default: '',
     index: true,
@@ -61,7 +89,8 @@ const opportunitySchema = new mongoose.Schema({
     },
   },
 
-  // Valuation & Pipeline Stage: Qualification -> Needs Analysis -> Proposal -> Negotiation -> Closed Won | Closed Lost
+  // Valuation & Pipeline Stage:
+  // New Opportunity -> Contacted -> Requirement Understanding -> Proposal / Quotation -> Negotiation -> Won / Lost
   amount: {
     type: Number,
     default: 0,
@@ -80,27 +109,59 @@ const opportunitySchema = new mongoose.Schema({
   stage: {
     type: String,
     enum: [
+      'New Opportunity',
+      'Contacted',
+      'Requirement Understanding',
+      'Proposal / Quotation',
+      'Proposal/Quotation',
+      'Negotiation',
+      'Won',
+      'Lost',
+      // Legacy compatibility:
       'Qualification',
       'Needs Analysis',
       'Proposal',
-      'Negotiation',
       'Closed Won',
       'Closed Lost',
-      'Won',
-      'Lost',
     ],
-    default: 'Qualification',
+    default: 'New Opportunity',
     index: true,
   },
   opportunity_stage: {
     type: String,
-    default: 'QUALIFICATION',
+    default: 'NEW_OPPORTUNITY',
+  },
+  lostReason: {
+    type: String,
+    enum: [
+      'Price too high',
+      'Competitor selected',
+      'Budget unavailable',
+      'Requirement changed',
+      'Not interested',
+      'Other',
+      '',
+    ],
+    default: '',
+  },
+  lostReasonDetails: {
+    type: String,
+    trim: true,
+    default: '',
+  },
+  wonAt: {
+    type: Date,
+    default: null,
+  },
+  lostAt: {
+    type: Date,
+    default: null,
   },
   probability: {
     type: Number,
     min: [0, 'Probability cannot be less than 0'],
     max: [100, 'Probability cannot be more than 100'],
-    default: 20,
+    default: 10,
   },
   expectedCloseDate: {
     type: Date,
@@ -223,6 +284,20 @@ opportunitySchema.pre('save', function (next) {
     this.relatedLeadName = this.sourceLeadName;
   }
 
+  // Synchronize leadId and originalLeadId
+  if (this.leadId && !this.originalLeadId) {
+    this.originalLeadId = this.leadId;
+  } else if (this.originalLeadId && !this.leadId) {
+    this.leadId = this.originalLeadId;
+  }
+
+  // Synchronize leadSource and campaign_source
+  if (this.leadSource && !this.campaign_source) {
+    this.campaign_source = this.leadSource;
+  } else if (this.campaign_source && !this.leadSource) {
+    this.leadSource = this.campaign_source;
+  }
+
   // Synchronize remarks and notes
   if (this.remarks && !this.notes) {
     this.notes = this.remarks;
@@ -232,7 +307,22 @@ opportunitySchema.pre('save', function (next) {
 
   // Synchronize opportunity_stage and stage
   if (this.stage) {
-    this.opportunity_stage = this.stage.toUpperCase().replace(/\s+/g, '_');
+    this.opportunity_stage = this.stage.toUpperCase().replace(/[\s\/]+/g, '_');
+  }
+
+  // Handle stage timestamps (Won / Lost)
+  if (this.stage === 'Won' || this.stage === 'Closed Won') {
+    if (!this.wonAt) this.wonAt = new Date();
+    this.lostAt = null;
+    this.lostReason = '';
+    this.lostReasonDetails = '';
+  } else if (this.stage === 'Lost' || this.stage === 'Closed Lost') {
+    if (!this.lostAt) this.lostAt = new Date();
+    this.wonAt = null;
+  } else {
+    // Active stage
+    this.wonAt = null;
+    this.lostAt = null;
   }
 
   // Calculate days in stage and risk status (>14 days without activity)

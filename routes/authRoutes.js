@@ -127,7 +127,7 @@ router.post('/register', async (req, res) => {
 
       fallbackStore.users.unshift(newUser);
 
-      // Create notification for Manager in fallback store
+      // Create notification for Super Admin in fallback store
       const notifItem = {
         _id: 'notif_' + Date.now(),
         userName: newUser.name,
@@ -136,15 +136,15 @@ router.post('/register', async (req, res) => {
         taskType: 'general',
         type: 'user_registered',
         title: 'New User Registration Awaiting Approval',
-        message: `${newUser.name} (${newUser.email}) from department "${newUser.department}" has registered and is awaiting your approval.`,
-        forRole: 'Manager',
+        message: `${newUser.name} (${newUser.email}) from department "${newUser.department}" has registered and is awaiting Super Admin approval.`,
+        forRole: 'Super Admin',
         isRead: false,
         createdAt: new Date(),
       };
       fallbackStore.notifications.unshift(notifItem);
       fallbackStore.saveToFile();
 
-      // Real-time socket broadcast to Managers
+      // Real-time socket broadcast to Super Admin
       try {
         const io = req.app.get('io');
         if (io) {
@@ -153,12 +153,12 @@ router.post('/register', async (req, res) => {
             title: 'New User Registration Awaiting Approval',
             message: notifItem.message,
             type: 'user_registered',
-            forRole: 'Manager',
+            forRole: 'Super Admin',
           };
           io.emit('notification:new', payload);
-          io.to('role:Manager').emit('notification:new', payload);
+          io.to('role:Super Admin').emit('notification:new', payload);
           io.emit('approvals:updated');
-          io.to('role:Manager').emit('approvals:updated');
+          io.to('role:Super Admin').emit('approvals:updated');
           io.emit('users:updated');
         }
       } catch (sockErr) {
@@ -167,7 +167,7 @@ router.post('/register', async (req, res) => {
 
       return res.status(201).json({
         success: true,
-        message: 'Account registration submitted! Your account is pending manager approval before you can log in.',
+        message: 'Account registration submitted! Your account is pending Super Admin approval before you can log in.',
         approvalStatus: 'Pending',
         user: {
           id: newUser._id,
@@ -209,7 +209,7 @@ router.post('/register', async (req, res) => {
         status: cleanStatus,
       });
 
-      // Create notification for Manager
+      // Create notification for Super Admin
       let createdNotif = null;
       try {
         createdNotif = await Notification.create({
@@ -219,15 +219,15 @@ router.post('/register', async (req, res) => {
           taskType: 'general',
           type: 'user_registered',
           title: 'New User Registration Awaiting Approval',
-          message: `${user.name} (${user.email}) from department "${user.department}" has registered and is awaiting your approval.`,
-          forRole: 'Manager',
+          message: `${user.name} (${user.email}) from department "${user.department}" has registered and is awaiting Super Admin approval.`,
+          forRole: 'Super Admin',
           isRead: false,
         });
       } catch (notifErr) {
         console.warn('Notification create warning:', notifErr.message);
       }
 
-      // Real-time socket broadcast to Managers
+      // Real-time socket broadcast to Super Admin
       try {
         const io = req.app.get('io');
         if (io) {
@@ -240,20 +240,20 @@ router.post('/register', async (req, res) => {
               taskType: 'general',
               type: 'user_registered',
               title: 'New User Registration Awaiting Approval',
-              message: `${user.name} (${user.email}) from department "${user.department}" has registered and is awaiting your approval.`,
-              forRole: 'Manager',
+              message: `${user.name} (${user.email}) from department "${user.department}" has registered and is awaiting Super Admin approval.`,
+              forRole: 'Super Admin',
               isRead: false,
               createdAt: new Date(),
             },
             title: 'New User Registration Awaiting Approval',
-            message: `${user.name} (${user.email}) from department "${user.department}" has registered and is awaiting your approval.`,
+            message: `${user.name} (${user.email}) from department "${user.department}" has registered and is awaiting Super Admin approval.`,
             type: 'user_registered',
-            forRole: 'Manager',
+            forRole: 'Super Admin',
           };
           io.emit('notification:new', payload);
-          io.to('role:Manager').emit('notification:new', payload);
+          io.to('role:Super Admin').emit('notification:new', payload);
           io.emit('approvals:updated');
-          io.to('role:Manager').emit('approvals:updated');
+          io.to('role:Super Admin').emit('approvals:updated');
           io.emit('users:updated');
         }
       } catch (sockErr) {
@@ -287,7 +287,7 @@ router.post('/register', async (req, res) => {
 
       return res.status(201).json({
         success: true,
-        message: 'Account registration submitted! Your account is pending manager approval before you can log in.',
+        message: 'Account registration submitted! Your account is pending Super Admin approval before you can log in.',
         approvalStatus: 'Pending',
         user: {
           id: user._id,
@@ -514,13 +514,13 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    // Check approval status (Super Admin & Managers always approved, default is Approved)
-    const isLeadership = user.role === 'Super Admin' || user.role === 'Manager' || user.role === 'Executive';
+    // Check approval status (Super Admin always approved, default is Approved)
+    const isLeadership = user.role === 'Super Admin';
     const userStatus = user.status || 'Approved';
     if (!isLeadership && userStatus === 'Pending') {
       return res.status(403).json({
         success: false,
-        message: "You can't login because the manager has not approved your registration yet. Please wait for manager approval.",
+        message: "You can't login because the Super Admin has not approved your registration yet. Please wait for Super Admin approval.",
         approvalStatus: 'Pending',
       });
     }
@@ -528,7 +528,7 @@ router.post('/login', async (req, res) => {
     if (!isLeadership && userStatus === 'Rejected') {
       return res.status(403).json({
         success: false,
-        message: 'Your registration request has been rejected by the manager. Please contact your manager.',
+        message: 'Your registration request has been rejected by the Super Admin. Please contact the administrator.',
         approvalStatus: 'Rejected',
       });
     }

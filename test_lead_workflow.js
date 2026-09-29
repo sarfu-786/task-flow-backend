@@ -85,7 +85,7 @@ async function runTests() {
         contactPerson: 'Vikram Malhotra',
         company: 'Acme Apex Corp',
         mobileNumber: '+91 99887 76655',
-        email: 'vikram.m@acmeapex.com',
+        email: `vikram_${Date.now()}@acmeapex.com`,
         source: 'Website',
         requirement: 'Enterprise Lead Management with 25 Sales Reps and SLA Escalation',
         status: 'New',

@@ -25,18 +25,49 @@ async function runTests() {
     const baseUrl = 'http://localhost:5099/api';
 
     try {
-      // 1. Login as Manager (Sarfaraj Ahmad)
-      console.log('1. Testing Manager Login...');
+      const testSuffix = Math.floor(1000 + Math.random() * 9000);
+      const mgrEmail = `test.mgr${testSuffix}@taskflow.com`;
+      const mgrUsername = `testmgr${testSuffix}`;
+      const empEmail = `test.emp${testSuffix}@taskflow.com`;
+      const empUsername = `testemp${testSuffix}`;
+      const applicantEmail = `applicant.${testSuffix}@taskflow.com`;
+      const applicantUsername = `applicant${testSuffix}`;
+
+      // 1. Login as Super Admin (Sarfaraj Ahmad)
+      console.log('1. Testing Super Admin Login...');
+      const adminLoginRes = await fetch(`${baseUrl}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ usernameOrEmail: 'sarfrajahamad068@gmail.com', password: 'user123' }),
+      });
+      const adminLoginData = await adminLoginRes.json();
+      assert.strictEqual(adminLoginRes.status, 200);
+      assert.ok(adminLoginData.token, 'Token must be received');
+      assert.strictEqual(adminLoginData.user.role, 'Super Admin');
+      console.log(`✓ Super Admin logged in: ${adminLoginData.user.name} (${adminLoginData.user.email})`);
+      const adminToken = adminLoginData.token;
+
+      // Create a test Manager to test role separation
+      const createMgrRes = await fetch(`${baseUrl}/users`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Test Manager',
+          email: mgrEmail,
+          username: mgrUsername,
+          password: 'managerpassword123',
+          role: 'Manager',
+          department: 'Management',
+        }),
+      });
+      const createMgrData = await createMgrRes.json();
+      assert.strictEqual(createMgrRes.status, 201);
       const mgrLoginRes = await fetch(`${baseUrl}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ usernameOrEmail: 'sarfrajahamad068@gmail.com', password: '998466' }),
+        body: JSON.stringify({ usernameOrEmail: mgrEmail, password: 'managerpassword123' }),
       });
       const mgrLoginData = await mgrLoginRes.json();
-      assert.strictEqual(mgrLoginRes.status, 200);
-      assert.ok(mgrLoginData.token, 'Token must be received');
-      assert.strictEqual(mgrLoginData.user.role, 'Manager');
-      console.log(`✓ Manager logged in: ${mgrLoginData.user.name} (${mgrLoginData.user.email})`);
       const mgrToken = mgrLoginData.token;
 
       // 2. Manager edits own profile (PUT /api/auth/profile)
@@ -48,15 +79,15 @@ async function runTests() {
           Authorization: `Bearer ${mgrToken}`,
         },
         body: JSON.stringify({
-          name: 'Sarfaraj Ahmad (Updated)',
+          name: 'Test Manager (Updated)',
           department: 'Executive Management',
-          username: 'sarfraj',
+          username: mgrUsername,
         }),
       });
       const mgrUpdateData = await mgrUpdateRes.json();
       assert.strictEqual(mgrUpdateRes.status, 200);
       assert.strictEqual(mgrUpdateData.success, true);
-      assert.strictEqual(mgrUpdateData.user.name, 'Sarfaraj Ahmad (Updated)');
+      assert.strictEqual(mgrUpdateData.user.name, 'Test Manager (Updated)');
       assert.strictEqual(mgrUpdateData.user.department, 'Executive Management');
       console.log('✓ Manager profile updated successfully:', mgrUpdateData.user.name, mgrUpdateData.user.department);
 
@@ -67,7 +98,7 @@ async function runTests() {
       });
       const meData = await meRes.json();
       assert.strictEqual(meRes.status, 200);
-      assert.strictEqual(meData.user.name, 'Sarfaraj Ahmad (Updated)');
+      assert.strictEqual(meData.user.name, 'Test Manager (Updated)');
       console.log('✓ Verified GET /api/auth/me reflects updated profile data');
 
       // 4. Test Email / Username collision protection
@@ -76,7 +107,7 @@ async function runTests() {
         method: 'PUT',
         headers: { Authorization: `Bearer ${mgrUpdateData.token || mgrToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: 'asif@gmail.com', // already belongs to Asif
+          email: 'sarfrajahamad068@gmail.com', // already belongs to Sarfaraj
         }),
       });
       const duplicateData = await duplicateRes.json();
@@ -91,8 +122,8 @@ async function runTests() {
         headers: { Authorization: `Bearer ${mgrUpdateData.token || mgrToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: 'Test Employee',
-          email: 'test.emp@taskflow.com',
-          username: 'testemp',
+          email: empEmail,
+          username: empUsername,
           password: 'user123',
           role: 'User',
           department: 'Engineering',
@@ -107,7 +138,7 @@ async function runTests() {
       const empLoginRes = await fetch(`${baseUrl}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ usernameOrEmail: 'test.emp@taskflow.com', password: 'user123' }),
+        body: JSON.stringify({ usernameOrEmail: empEmail, password: 'user123' }),
       });
       const empLoginData = await empLoginRes.json();
       assert.strictEqual(empLoginRes.status, 200);
@@ -138,7 +169,7 @@ async function runTests() {
       const empNewLoginRes = await fetch(`${baseUrl}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ usernameOrEmail: 'test.emp@taskflow.com', password: 'newpassword123' }),
+        body: JSON.stringify({ usernameOrEmail: empEmail, password: 'newpassword123' }),
       });
       const empNewLoginData = await empNewLoginRes.json();
       assert.strictEqual(empNewLoginRes.status, 200);
@@ -162,26 +193,17 @@ async function runTests() {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${mgrUpdateData.token || mgrToken}` },
       });
-      await fetch(`${baseUrl}/auth/profile`, {
-        method: 'PUT',
-        headers: { Authorization: `Bearer ${mgrUpdateData.token || mgrToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: 'Sarfaraj Ahmad',
-          department: 'Management',
-          username: 'sarfraj',
-        }),
-      });
-      console.log('✓ Cleaned up test employee and restored manager default data');
+      console.log('✓ Cleaned up test employee record');
 
-      // 11. Test Public Registration flow (Creates 'Pending' user and Manager notification)
+      // 11. Test Public Registration flow (Creates 'Pending' user and Super Admin notification)
       console.log('\n11. Testing public user registration creating Pending approval status...');
       const registerRes = await fetch(`${baseUrl}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: 'Applicant User',
-          email: 'applicant.test@taskflow.com',
-          username: 'applicantuser',
+          email: applicantEmail,
+          username: applicantUsername,
           password: 'secretpassword',
           department: 'Internet Work',
         }),
@@ -191,29 +213,48 @@ async function runTests() {
       assert.strictEqual(registerData.approvalStatus, 'Pending');
       console.log('✓ Public registration successfully submitted with Pending status:', registerData.user.name);
 
-      // 12. Test Manager GET /api/users/approvals for Pending count and indicator
-      console.log('\n12. Testing Manager retrieval of pending approvals and counts...');
-      const approvalsRes = await fetch(`${baseUrl}/users/approvals?status=Pending`, {
+      // 12. Test Super Admin GET /api/users/approvals and verify Manager is Forbidden (403)
+      console.log('\n12. Testing Approvals access control (Manager forbidden 403, Super Admin allowed 200)...');
+      const mgrApprovalsRes = await fetch(`${baseUrl}/users/approvals?status=Pending`, {
         headers: { Authorization: `Bearer ${mgrToken}` },
+      });
+      assert.strictEqual(mgrApprovalsRes.status, 403, 'Manager must be forbidden from accessing approvals');
+      console.log('✓ Manager forbidden (403) from accessing approvals as expected');
+
+      const approvalsRes = await fetch(`${baseUrl}/users/approvals?status=Pending`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
       });
       const approvalsData = await approvalsRes.json();
       assert.strictEqual(approvalsRes.status, 200);
       assert.ok(approvalsData.counts.pending >= 1, 'Pending approvals count must be at least 1');
-      const foundPending = approvalsData.users.find(u => u.email === 'applicant.test@taskflow.com');
+      const foundPending = approvalsData.users.find(u => u.email === applicantEmail);
       assert.ok(foundPending, 'Newly registered applicant must appear in pending list');
-      console.log(`✓ Manager approvals API returned ${approvalsData.counts.pending} pending registrations`);
+      console.log(`✓ Super Admin approvals API returned ${approvalsData.counts.pending} pending registrations`);
 
-      // 13. Test Manager approving registration (PUT /api/users/:id/approval)
-      console.log('\n13. Testing Manager approval action...');
-      const approveRes = await fetch(`${baseUrl}/users/${registerData.user.id || registerData.user._id}/approval`, {
+      // 13. Test Super Admin approving registration (PUT /api/users/:id/approval) and Manager forbidden
+      console.log('\n13. Testing Super Admin approval action & Manager restriction...');
+      const mgrApproveRes = await fetch(`${baseUrl}/users/${registerData.user.id || registerData.user._id}/approval`, {
         method: 'PUT',
         headers: { Authorization: `Bearer ${mgrToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'Approved', department: 'Internet Work' }),
       });
+      assert.strictEqual(mgrApproveRes.status, 403, 'Manager must not be able to approve users');
+      console.log('✓ Manager forbidden (403) from approving user');
+
+      const approveRes = await fetch(`${baseUrl}/users/${registerData.user.id || registerData.user._id}/approval`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          status: 'Approved',
+          department: 'Internet Work',
+          reportsTo: createMgrData.user._id || createMgrData.user.id,
+          reportsToName: 'Test Manager',
+        }),
+      });
       const approveData = await approveRes.json();
       assert.strictEqual(approveRes.status, 200);
       assert.strictEqual(approveData.user.status, 'Approved');
-      console.log('✓ Manager approved applicant registration successfully');
+      console.log('✓ Super Admin approved applicant registration successfully');
 
       // 14. Test Manager assigning a new task to the newly registered & approved user
       console.log('\n14. Testing Manager creating & assigning a new task to newly approved user...');
@@ -243,7 +284,7 @@ async function runTests() {
       const applicantLoginRes = await fetch(`${baseUrl}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ usernameOrEmail: 'applicant.test@taskflow.com', password: 'secretpassword' }),
+        body: JSON.stringify({ usernameOrEmail: applicantEmail, password: 'secretpassword' }),
       });
       const applicantLoginData = await applicantLoginRes.json();
       assert.strictEqual(applicantLoginRes.status, 200);
@@ -270,17 +311,21 @@ async function runTests() {
       assert.strictEqual(statusData.task.status, 'In Progress');
       console.log('✓ Task status successfully updated to "In Progress"');
 
-      // 17. Clean up: Delete created task and applicant user
-      console.log('\n17. Cleaning up test task and applicant user record...');
+      // 17. Clean up: Delete created task, applicant user, and test manager
+      console.log('\n17. Cleaning up test task, applicant user, and test manager records...');
       await fetch(`${baseUrl}/tasks/${createTaskData.task._id}`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${mgrToken}` },
+        headers: { Authorization: `Bearer ${adminToken}` },
       });
       await fetch(`${baseUrl}/users/${registerData.user.id || registerData.user._id}`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${mgrToken}` },
+        headers: { Authorization: `Bearer ${adminToken}` },
       });
-      console.log('✓ Cleaned up test task and applicant test record');
+      await fetch(`${baseUrl}/users/${createMgrData.user._id || createMgrData.user.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      console.log('✓ Cleaned up test task, applicant, and test manager records');
 
       console.log('\n===============================================================');
       console.log('🎉 ALL PROFILE, REGISTRATION, APPROVALS & TASK ASSIGNMENT TESTS PASSED 100%!');

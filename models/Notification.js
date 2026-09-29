@@ -29,9 +29,25 @@ const notificationSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Task',
   },
+  leadId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Lead',
+  },
+  leadReadableId: {
+    type: String,
+    default: '',
+  },
+  complaintId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Complaint',
+  },
+  projectId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Project',
+  },
   taskDescription: {
     type: String,
-    required: true,
+    default: '',
   },
   taskType: {
     type: String,
@@ -39,15 +55,6 @@ const notificationSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: [
-      'task_completed',
-      'task_in_progress',
-      'task_assigned',
-      'remark_added',
-      'user_registered',
-      'user_approved',
-      'user_rejected',
-    ],
     default: 'task_completed',
   },
   title: {
@@ -78,3 +85,4 @@ const notificationSchema = new mongoose.Schema({
 });
 
 module.exports = mongoose.model('Notification', notificationSchema);
+

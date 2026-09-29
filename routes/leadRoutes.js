@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const Lead = require('../models/Lead');
 const Opportunity = require('../models/Opportunity');
 const User = require('../models/User');
+const Notification = require('../models/Notification');
 const { protect } = require('../middleware/auth');
 const { fallbackStore } = require('../config/db');
 const { logAuditAction } = require('../services/auditService');
@@ -170,6 +171,294 @@ const canUserAccessLead = (currentUser, lead, allUsers = []) => {
   if (!currentUser || !lead) return false;
   const scope = getUserScopeContext(currentUser, allUsers);
   return isLeadAccessible(scope, lead);
+};
+
+/**
+ * Creates and dispatches instant notification for lead assignment / creation / reassignment
+ */
+const createLeadAssignmentNotification = async ({
+  lead,
+  targetAssignedTo,
+  targetUserId,
+  assignerUser,
+  isReassignment = false,
+  io = null,
+}) => {
+  try {
+    const assignerName = assignerUser?.name || 'System / Manager';
+    const assignerAvatar = assignerUser?.avatar || '';
+    const assignerRole = assignerUser?.role || 'Admin';
+    const assignedBy = `${assignerName} (${assignerRole})`;
+
+    // Resolve target user
+    let allUsers = [];
+    if (fallbackStore.isFallback) {
+      allUsers = fallbackStore.users || [];
+    } else {
+      allUsers = await User.find({}).select('_id name username email role avatar').lean();
+    }
+
+    let targetUser = null;
+    if (targetUserId) {
+      targetUser = allUsers.find(
+        (u) => u && u._id && u._id.toString() === targetUserId.toString()
+      );
+    }
+    if (!targetUser && targetAssignedTo) {
+      const cleanTarget = targetAssignedTo.toString().trim().toLowerCase();
+      targetUser = allUsers.find(
+        (u) =>
+          (u.name && u.name.trim().toLowerCase() === cleanTarget) ||
+          (u.username && u.username.trim().toLowerCase() === cleanTarget) ||
+          (u.email && u.email.trim().toLowerCase() === cleanTarget) ||
+          (u._id && u._id.toString() === cleanTarget)
+      );
+    }
+
+    const safeAssignerId = assignerUser && assignerUser._id
+      ? (assignerUser._id.toString ? assignerUser._id.toString() : assignerUser._id)
+      : undefined;
+
+    const safeRecipientId = targetUser && targetUser._id
+      ? (targetUser._id.toString ? targetUser._id.toString() : targetUser._id)
+      : (targetUserId ? targetUserId.toString() : undefined);
+
+    const safeLeadId = lead && lead._id
+      ? (lead._id.toString ? lead._id.toString() : lead._id)
+      : undefined;
+
+    const leadIdFormatted = lead.leadId || 'LD-NEW';
+    const leadName = lead.name || lead.contactPerson || 'New Prospect';
+    const companyName = lead.company ? `(${lead.company})` : '';
+    const dealVal = Number(lead.estimatedValue || lead.dealValue || 0);
+    const valueStr = dealVal > 0 ? `₹${dealVal.toLocaleString('en-IN')}` : 'Not Specified';
+    const sourceStr = lead.source || 'Direct Website';
+    const priorityStr = lead.priority || 'Medium';
+    const contactStr = [lead.phone || lead.mobileNumber, lead.email].filter(Boolean).join(' • ') || 'No contact specified';
+
+    const notifTitle = isReassignment
+      ? `🎯 Lead Reassigned: ${leadName} [${leadIdFormatted}]`
+      : `🎯 New Lead Received: ${leadName} [${leadIdFormatted}]`;
+
+    const notifMessage = isReassignment
+      ? `${assignedBy} reassigned lead "${leadName}" ${companyName} to you.`
+      : `${assignedBy} assigned you a new lead: "${leadName}" ${companyName}. Value: ${valueStr}, Priority: ${priorityStr}.`;
+
+    const notifDesc = `Lead [${leadIdFormatted}]: ${leadName} ${companyName} • Source: ${sourceStr} • Value: ${valueStr}`;
+    const notifRemark = `Contact: ${contactStr} | Priority: ${priorityStr}${lead.requirement ? ` | Req: "${lead.requirement.substring(0, 100)}"` : ''}`;
+
+    const forRole = (targetUser?.role === 'Manager' || targetUser?.role === 'Super Admin') ? 'Manager' : 'User';
+
+    const notifData = {
+      user: safeAssignerId,
+      recipientUser: safeRecipientId,
+      recipientName: targetAssignedTo || targetUser?.name || 'Sales Representative',
+      userName: assignerName,
+      userAvatar: assignerAvatar,
+      assignedBy: assignedBy,
+      leadId: safeLeadId,
+      leadReadableId: leadIdFormatted,
+      taskDescription: notifDesc,
+      taskType: 'lead',
+      type: 'lead_assigned',
+      title: notifTitle,
+      message: notifMessage,
+      remark: notifRemark,
+      isRead: false,
+      forRole: forRole,
+      createdAt: new Date(),
+    };
+
+    let createdNotif = null;
+
+    if (fallbackStore.isFallback) {
+      if (!fallbackStore.notifications) {
+        fallbackStore.notifications = [];
+      }
+      const notifId = '64e8c3' + Math.random().toString(16).substring(2, 10) + '00000000'.substring(0, 10);
+      createdNotif = { _id: notifId, ...notifData };
+      fallbackStore.notifications.unshift(createdNotif);
+      fallbackStore.saveToFile();
+    } else {
+      createdNotif = await Notification.create(notifData);
+    }
+
+    // Instant Real-Time Socket.io dispatch
+    if (io) {
+      const payload = {
+        notification: createdNotif,
+        lead: lead,
+        type: 'lead_assigned',
+        title: notifTitle,
+        message: notifMessage,
+        remark: notifRemark,
+        leadId: safeLeadId,
+        leadReadableId: leadIdFormatted,
+        assignedBy: assignedBy,
+        forRole: forRole,
+        recipientUser: safeRecipientId,
+        recipientName: targetAssignedTo || targetUser?.name || '',
+      };
+
+      // 1. Send direct to recipient user ID room
+      if (safeRecipientId) {
+        io.to(`user:${safeRecipientId.toString()}`).emit('notification:new', payload);
+        io.to(`user:${safeRecipientId.toString()}`).emit('lead:assigned', { lead, notification: createdNotif });
+      }
+
+      // 2. Send direct to recipient username / name rooms
+      if (targetAssignedTo) {
+        const cleanName = targetAssignedTo.toString().toLowerCase().trim();
+        io.to(`user:${cleanName}`).emit('notification:new', payload);
+        io.to(`user:${cleanName}`).emit('lead:assigned', { lead, notification: createdNotif });
+      }
+      if (targetUser?.username) {
+        const cleanUsername = targetUser.username.toString().toLowerCase().trim();
+        io.to(`user:${cleanUsername}`).emit('notification:new', payload);
+      }
+      if (targetUser?.name) {
+        const cleanTName = targetUser.name.toString().toLowerCase().trim();
+        io.to(`user:${cleanTName}`).emit('notification:new', payload);
+      }
+
+      // 3. If assigner assigned to self, also emit to assigner's rooms
+      if (assignerUser) {
+        const aId = assignerUser._id?.toString() || assignerUser.id?.toString();
+        const aName = assignerUser.name?.toLowerCase().trim();
+        if (targetAssignedTo && aName && targetAssignedTo.toLowerCase().trim() === aName) {
+          if (aId) io.to(`user:${aId}`).emit('notification:new', payload);
+          if (aName) io.to(`user:${aName}`).emit('notification:new', payload);
+        }
+      }
+
+      // 4. Update leads list and stats for all connected clients
+      io.emit('leads:updated', { lead, action: isReassignment ? 'updated' : 'created' });
+      io.emit('stats:updated');
+    }
+
+    return createdNotif;
+  } catch (err) {
+    console.error('[Lead Notification Helper Error]', err.message);
+  }
+};
+
+/**
+ * Creates and dispatches instant notification for scheduled lead follow-ups
+ */
+const createFollowUpNotification = async ({
+  lead,
+  followUp,
+  assignerUser,
+  io = null,
+}) => {
+  try {
+    const targetAssignedTo = followUp.assignedTo || lead.assignedTo;
+    if (!targetAssignedTo) return;
+
+    const assignerName = assignerUser?.name || 'System / Manager';
+    const assignerAvatar = assignerUser?.avatar || '';
+    const assignerRole = assignerUser?.role || 'Admin';
+    const assignedBy = `${assignerName} (${assignerRole})`;
+
+    let allUsers = [];
+    if (fallbackStore.isFallback) {
+      allUsers = fallbackStore.users || [];
+    } else {
+      allUsers = await User.find({}).select('_id name username email role avatar').lean();
+    }
+
+    const cleanTarget = targetAssignedTo.toString().trim().toLowerCase();
+    const targetUser = allUsers.find(
+      (u) =>
+        (u.name && u.name.trim().toLowerCase() === cleanTarget) ||
+        (u.username && u.username.trim().toLowerCase() === cleanTarget) ||
+        (u.email && u.email.trim().toLowerCase() === cleanTarget) ||
+        (u._id && u._id.toString() === cleanTarget)
+    );
+
+    const safeAssignerId = assignerUser && assignerUser._id
+      ? (assignerUser._id.toString ? assignerUser._id.toString() : assignerUser._id)
+      : undefined;
+
+    const safeRecipientId = targetUser && targetUser._id
+      ? (targetUser._id.toString ? targetUser._id.toString() : targetUser._id)
+      : undefined;
+
+    const safeLeadId = lead && lead._id
+      ? (lead._id.toString ? lead._id.toString() : lead._id)
+      : undefined;
+
+    const leadIdFormatted = lead.leadId || 'LD-NEW';
+    const leadName = lead.name || lead.contactPerson || 'Prospect';
+    const fDateStr = followUp.followUpDate ? new Date(followUp.followUpDate).toLocaleDateString() : 'Scheduled Date';
+    const fTimeStr = followUp.followUpTime || '';
+
+    const notifTitle = `📅 Follow-Up Scheduled: ${leadName} [${leadIdFormatted}]`;
+    const notifMessage = `${assignedBy} scheduled a follow-up for lead "${leadName}" on ${fDateStr} ${fTimeStr}.`;
+    const notifDesc = `Lead [${leadIdFormatted}]: ${leadName} • Follow-Up Scheduled on ${fDateStr} ${fTimeStr}`;
+    const notifRemark = `Reason: ${followUp.reason || 'Lead follow-up'}${followUp.remarks ? ` | Notes: "${followUp.remarks}"` : ''}`;
+
+    const forRole = (targetUser?.role === 'Manager' || targetUser?.role === 'Super Admin') ? 'Manager' : 'User';
+
+    const notifData = {
+      user: safeAssignerId,
+      recipientUser: safeRecipientId,
+      recipientName: targetAssignedTo,
+      userName: assignerName,
+      userAvatar: assignerAvatar,
+      assignedBy: assignedBy,
+      leadId: safeLeadId,
+      leadReadableId: leadIdFormatted,
+      taskDescription: notifDesc,
+      taskType: 'lead',
+      type: 'lead_assigned',
+      title: notifTitle,
+      message: notifMessage,
+      remark: notifRemark,
+      isRead: false,
+      forRole: forRole,
+      createdAt: new Date(),
+    };
+
+    let createdNotif = null;
+
+    if (fallbackStore.isFallback) {
+      if (!fallbackStore.notifications) fallbackStore.notifications = [];
+      const notifId = '64e8c3' + Math.random().toString(16).substring(2, 10) + '00000000'.substring(0, 10);
+      createdNotif = { _id: notifId, ...notifData };
+      fallbackStore.notifications.unshift(createdNotif);
+      fallbackStore.saveToFile();
+    } else {
+      createdNotif = await Notification.create(notifData);
+    }
+
+    if (io) {
+      const payload = {
+        notification: createdNotif,
+        lead: lead,
+        followUp: followUp,
+        type: 'lead_assigned',
+        title: notifTitle,
+        message: notifMessage,
+        remark: notifRemark,
+        leadId: safeLeadId,
+        leadReadableId: leadIdFormatted,
+      };
+
+      if (safeRecipientId) {
+        io.to(`user:${safeRecipientId.toString()}`).emit('notification:new', payload);
+      }
+      if (targetAssignedTo) {
+        io.to(`user:${cleanTarget}`).emit('notification:new', payload);
+      }
+      if (targetUser?.username) {
+        io.to(`user:${targetUser.username.toLowerCase().trim()}`).emit('notification:new', payload);
+      }
+      io.emit('leads:updated', { lead, action: 'followup_scheduled' });
+    }
+  } catch (err) {
+    console.error('[Follow-Up Notification Helper Error]', err.message);
+  }
 };
 
 // @route   GET /api/leads
@@ -809,9 +1098,14 @@ router.post('/', protect, async (req, res) => {
         req,
       });
 
-      if (io) {
-        io.emit('leads:updated', { lead: createdLead, action: 'created' });
-      }
+      // Dispatch instant notification to assigned user
+      await createLeadAssignmentNotification({
+        lead: createdLead,
+        targetAssignedTo,
+        targetUserId,
+        assignerUser: req.user,
+        io,
+      });
 
       return res.status(201).json({
         success: true,
@@ -839,9 +1133,14 @@ router.post('/', protect, async (req, res) => {
         req,
       });
 
-      if (io) {
-        io.emit('leads:updated', { lead, action: 'created' });
-      }
+      // Dispatch instant notification to assigned user
+      await createLeadAssignmentNotification({
+        lead: lead.toObject ? lead.toObject() : lead,
+        targetAssignedTo,
+        targetUserId,
+        assignerUser: req.user,
+        io,
+      });
 
       return res.status(201).json({
         success: true,
@@ -1016,7 +1315,20 @@ router.put('/:id', protect, async (req, res) => {
         req,
       });
 
-      if (io) {
+      if (
+        assignedTarget !== undefined &&
+        assignedTarget.trim() &&
+        assignedTarget.trim().toLowerCase() !== (priorState.assignedTo || '').trim().toLowerCase()
+      ) {
+        await createLeadAssignmentNotification({
+          lead: updated,
+          targetAssignedTo: assignedTarget.trim(),
+          targetUserId,
+          assignerUser: req.user,
+          isReassignment: true,
+          io,
+        });
+      } else if (io) {
         io.emit('leads:updated', { lead: updated, action: 'updated' });
       }
 
@@ -1114,7 +1426,20 @@ router.put('/:id', protect, async (req, res) => {
         req,
       });
 
-      if (io) {
+      if (
+        assignedTarget !== undefined &&
+        assignedTarget.trim() &&
+        assignedTarget.trim().toLowerCase() !== (priorState.assignedTo || '').trim().toLowerCase()
+      ) {
+        await createLeadAssignmentNotification({
+          lead: lead.toObject ? lead.toObject() : lead,
+          targetAssignedTo: assignedTarget.trim(),
+          targetUserId,
+          assignerUser: req.user,
+          isReassignment: true,
+          io,
+        });
+      } else if (io) {
         io.emit('leads:updated', { lead, action: 'updated' });
       }
 
@@ -1829,7 +2154,12 @@ router.post('/:id/followups', protect, async (req, res) => {
       targetLead.updatedAt = new Date();
       fallbackStore.saveToFile();
 
-      if (io) io.emit('leads:updated', { lead: targetLead, action: 'followup_scheduled' });
+      await createFollowUpNotification({
+        lead: targetLead,
+        followUp: newFollowUp,
+        assignerUser: req.user,
+        io,
+      });
 
       return res.status(201).json({
         success: true,
@@ -1876,7 +2206,12 @@ router.post('/:id/followups', protect, async (req, res) => {
       targetLead.updatedAt = new Date();
       await targetLead.save();
 
-      if (io) io.emit('leads:updated', { lead: targetLead, action: 'followup_scheduled' });
+      await createFollowUpNotification({
+        lead: targetLead.toObject ? targetLead.toObject() : targetLead,
+        followUp: newFollowUp,
+        assignerUser: req.user,
+        io,
+      });
 
       return res.status(201).json({
         success: true,
@@ -2009,7 +2344,7 @@ router.post('/:id/convert', protect, async (req, res) => {
       opportunityName,
       dealValue = 0,
       amount = 0,
-      stage = 'Qualification',
+      stage = 'New Opportunity',
       expectedCloseDate,
       assignedTo,
       remarks = '',
@@ -2068,40 +2403,58 @@ router.post('/:id/convert', protect, async (req, res) => {
 
       // Probability mapped from stage
       const stageProbMap = {
+        'New Opportunity': 10,
+        Contacted: 25,
+        'Requirement Understanding': 40,
+        'Proposal / Quotation': 60,
+        'Proposal/Quotation': 60,
+        Negotiation: 80,
+        Won: 100,
+        Lost: 0,
         Qualification: 20,
         'Needs Analysis': 40,
         Proposal: 60,
-        Negotiation: 80,
         'Closed Won': 100,
         'Closed Lost': 0,
       };
-      const probability = stageProbMap[stage] !== undefined ? stageProbMap[stage] : 20;
+      const probability = stageProbMap[stage] !== undefined ? stageProbMap[stage] : 10;
 
       const generatedOppReadableId = await generateNextOpportunityId();
       const generatedOppId = '64e8e1' + Math.random().toString(16).substring(2, 10) + '00000000'.substring(0, 10);
 
       const oppRemarks = (remarks || notes || targetLead.remarks || targetLead.notes || '').trim();
+      const oppTitle = (opportunityName && opportunityName.trim()) || `${targetLead.company || targetLead.name || 'Lead'} - Opportunity`;
+      const leadContactPerson = targetLead.contactPerson || targetLead.name || '';
+      const leadEmail = targetLead.email || '';
+      const leadPhone = targetLead.phone || targetLead.mobileNumber || '';
+      const leadSourceVal = targetLead.source || targetLead.campaign_source || 'Website';
+      const leadIdVal = targetLead.leadId || targetLead.lead_id || targetLead._id.toString();
 
       const oppData = {
         _id: generatedOppId,
         opportunity_id: 'opp_' + crypto.randomUUID(),
         opportunityId: generatedOppReadableId,
-        name: (opportunityName && opportunityName.trim()) || `${targetLead.company || targetLead.name} - Opportunity`,
-        opportunityName: (opportunityName && opportunityName.trim()) || `${targetLead.company || targetLead.name} - Opportunity`,
+        name: oppTitle,
+        opportunityName: oppTitle,
         company: targetLead.company || '',
-        leadId: targetLead.leadId || targetLead.lead_id || '',
+        contactPerson: leadContactPerson,
+        email: leadEmail,
+        phone: leadPhone,
+        leadSource: leadSourceVal,
+        campaign_source: targetLead.campaign_source || leadSourceVal,
+        leadId: leadIdVal,
+        originalLeadId: leadIdVal,
         relatedLead: targetLead._id,
-        relatedLeadName: targetLead.name || '',
-        sourceLeadName: targetLead.name || '',
+        relatedLeadName: targetLead.name || leadContactPerson,
+        sourceLeadName: targetLead.name || leadContactPerson,
         amount: oppValue,
         dealValue: oppValue,
         pipeline_value: oppValue,
-        stage: stage || 'Qualification',
-        opportunity_stage: (stage || 'Qualification').toUpperCase().replace(/\s+/g, '_'),
+        stage: stage || 'New Opportunity',
+        opportunity_stage: (stage || 'New Opportunity').toUpperCase().replace(/[\s\/]+/g, '_'),
         probability,
         expectedCloseDate: expectedCloseDate ? new Date(expectedCloseDate) : null,
         priority: targetLead.priority || 'Medium',
-        campaign_source: targetLead.source || targetLead.campaign_source || 'Website Direct',
         cost_per_lead: targetLead.cost_per_lead || 25.0,
         assignedTo: oppAssignedTo,
         assignedBy: `${req.user?.name || 'User'} (${req.user?.role || 'User'})`,
@@ -2109,6 +2462,10 @@ router.post('/:id/convert', protect, async (req, res) => {
         user: oppTargetUserId,
         remarks: oppRemarks,
         notes: oppRemarks,
+        lostReason: '',
+        lostReasonDetails: '',
+        wonAt: null,
+        lostAt: null,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -2131,7 +2488,7 @@ router.post('/:id/convert', protect, async (req, res) => {
         eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
         eventType: 'CONVERTED_TO_OPPORTUNITY',
         title: `Converted to Opportunity ${generatedOppReadableId}`,
-        description: `Lead converted to Opportunity "${oppData.name}" with deal value of ${oppValue > 0 ? '₹' + oppValue.toLocaleString() : '₹0'}.`,
+        description: `Lead converted to Opportunity "${oppData.name}" with deal value of ${oppValue > 0 ? '₹' + oppValue.toLocaleString() : '₹0'} in stage "${oppData.stage}".`,
         author: req.user?.name || 'System',
         authorId: req.user?._id?.toString() || '',
         timestamp: new Date(),
@@ -2213,37 +2570,55 @@ router.post('/:id/convert', protect, async (req, res) => {
       const oppValue = Number(dealValue) || Number(amount) || targetLead.estimatedValue || targetLead.dealValue || targetLead.pipeline_value || 0;
 
       const stageProbMap = {
+        'New Opportunity': 10,
+        Contacted: 25,
+        'Requirement Understanding': 40,
+        'Proposal / Quotation': 60,
+        'Proposal/Quotation': 60,
+        Negotiation: 80,
+        Won: 100,
+        Lost: 0,
         Qualification: 20,
         'Needs Analysis': 40,
         Proposal: 60,
-        Negotiation: 80,
         'Closed Won': 100,
         'Closed Lost': 0,
       };
-      const probability = stageProbMap[stage] !== undefined ? stageProbMap[stage] : 20;
+      const probability = stageProbMap[stage] !== undefined ? stageProbMap[stage] : 10;
 
       const generatedOppReadableId = await generateNextOpportunityId();
       const oppRemarks = (remarks || notes || targetLead.remarks || targetLead.notes || '').trim();
+      const oppTitle = (opportunityName && opportunityName.trim()) || `${targetLead.company || targetLead.name || 'Lead'} - Opportunity`;
+      const leadContactPerson = targetLead.contactPerson || targetLead.name || '';
+      const leadEmail = targetLead.email || '';
+      const leadPhone = targetLead.phone || targetLead.mobileNumber || '';
+      const leadSourceVal = targetLead.source || targetLead.campaign_source || 'Website';
+      const leadIdVal = targetLead.leadId || targetLead.lead_id || targetLead._id.toString();
 
       const oppData = {
         opportunity_id: 'opp_' + crypto.randomUUID(),
         opportunityId: generatedOppReadableId,
-        name: (opportunityName && opportunityName.trim()) || `${targetLead.company || targetLead.name} - Opportunity`,
-        opportunityName: (opportunityName && opportunityName.trim()) || `${targetLead.company || targetLead.name} - Opportunity`,
+        name: oppTitle,
+        opportunityName: oppTitle,
         company: targetLead.company || '',
-        leadId: targetLead.leadId || targetLead.lead_id || '',
+        contactPerson: leadContactPerson,
+        email: leadEmail,
+        phone: leadPhone,
+        leadSource: leadSourceVal,
+        campaign_source: targetLead.campaign_source || leadSourceVal,
+        leadId: leadIdVal,
+        originalLeadId: leadIdVal,
         relatedLead: targetLead._id,
-        relatedLeadName: targetLead.name || '',
-        sourceLeadName: targetLead.name || '',
+        relatedLeadName: targetLead.name || leadContactPerson,
+        sourceLeadName: targetLead.name || leadContactPerson,
         amount: oppValue,
         dealValue: oppValue,
         pipeline_value: oppValue,
-        stage: stage || 'Qualification',
-        opportunity_stage: (stage || 'Qualification').toUpperCase().replace(/\s+/g, '_'),
+        stage: stage || 'New Opportunity',
+        opportunity_stage: (stage || 'New Opportunity').toUpperCase().replace(/[\s\/]+/g, '_'),
         probability,
         expectedCloseDate: expectedCloseDate ? new Date(expectedCloseDate) : null,
         priority: targetLead.priority || 'Medium',
-        campaign_source: targetLead.source || targetLead.campaign_source || 'Website Direct',
         cost_per_lead: targetLead.cost_per_lead || 25.0,
         assignedTo: oppAssignedTo,
         assignedBy: `${req.user?.name || 'User'} (${req.user?.role || 'User'})`,
@@ -2251,6 +2626,10 @@ router.post('/:id/convert', protect, async (req, res) => {
         user: oppTargetUserId,
         remarks: oppRemarks,
         notes: oppRemarks,
+        lostReason: '',
+        lostReasonDetails: '',
+        wonAt: null,
+        lostAt: null,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -2269,7 +2648,7 @@ router.post('/:id/convert', protect, async (req, res) => {
         eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
         eventType: 'CONVERTED_TO_OPPORTUNITY',
         title: `Converted to Opportunity ${generatedOppReadableId}`,
-        description: `Lead converted to Opportunity "${opportunity.name}" with deal value of ${oppValue > 0 ? '₹' + oppValue.toLocaleString() : '₹0'}.`,
+        description: `Lead converted to Opportunity "${opportunity.name}" with deal value of ${oppValue > 0 ? '₹' + oppValue.toLocaleString() : '₹0'} in stage "${oppData.stage}".`,
         author: req.user?.name || 'System',
         authorId: req.user?._id?.toString() || '',
         timestamp: new Date(),
@@ -2871,9 +3250,13 @@ router.post('/:id/claim', protect, async (req, res) => {
         req,
       });
 
-      if (io) {
-        io.emit('leads:updated', { lead: targetLead, action: 'claimed' });
-      }
+      await createLeadAssignmentNotification({
+        lead: targetLead,
+        targetAssignedTo: claimerName,
+        targetUserId: claimerId,
+        assignerUser: req.user,
+        io,
+      });
 
       return res.json({
         success: true,
@@ -2908,9 +3291,13 @@ router.post('/:id/claim', protect, async (req, res) => {
         req,
       });
 
-      if (io) {
-        io.emit('leads:updated', { lead: targetLead.toObject(), action: 'claimed' });
-      }
+      await createLeadAssignmentNotification({
+        lead: targetLead.toObject ? targetLead.toObject() : targetLead,
+        targetAssignedTo: claimerName,
+        targetUserId: claimerId,
+        assignerUser: req.user,
+        io,
+      });
 
       return res.json({
         success: true,

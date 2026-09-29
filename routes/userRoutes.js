@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
-const { protect } = require('../middleware/auth');
+const { protect, checkRole } = require('../middleware/auth');
 const { fallbackStore } = require('../config/db');
 
 // Helper to get all user IDs that belong to the requester's reporting branch or were created by requester
@@ -815,8 +815,8 @@ router.delete('/:id', protect, async (req, res) => {
 
 // @route   GET /api/users/approvals
 // @desc    Get all user registrations with approval status
-// @access  Private (Manager only)
-router.get('/approvals', protect, async (req, res) => {
+// @access  Private (Super Admin only)
+router.get('/approvals', protect, checkRole('Super Admin'), async (req, res) => {
   try {
     const { status, search } = req.query;
 
@@ -898,8 +898,8 @@ router.get('/approvals', protect, async (req, res) => {
 
 // @route   PUT /api/users/:id/approval
 // @desc    Approve or reject a user registration
-// @access  Private (Manager only)
-router.put('/:id/approval', protect, async (req, res) => {
+// @access  Private (Super Admin only)
+router.put('/:id/approval', protect, checkRole('Super Admin'), async (req, res) => {
   try {
     const { id } = req.params;
     const { status, department, role, reportsTo, reportsToName } = req.body;
@@ -945,7 +945,7 @@ router.put('/:id/approval', protect, async (req, res) => {
         const io = req.app.get('io');
         if (io) {
           io.emit('approvals:updated');
-          io.to('role:Manager').emit('approvals:updated');
+          io.to('role:Super Admin').emit('approvals:updated');
           io.emit('users:updated');
           io.emit('notification:updated');
         }
@@ -1011,7 +1011,7 @@ router.put('/:id/approval', protect, async (req, res) => {
         const io = req.app.get('io');
         if (io) {
           io.emit('approvals:updated');
-          io.to('role:Manager').emit('approvals:updated');
+          io.to('role:Super Admin').emit('approvals:updated');
           io.emit('users:updated');
           io.emit('notification:updated');
         }

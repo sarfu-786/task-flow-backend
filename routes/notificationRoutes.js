@@ -11,7 +11,8 @@ const escapeRegex = (str) => (str ? str.toString().replace(/[.*+?^${}()|[\]\\]/g
 // @access  Private
 router.get('/', protect, async (req, res) => {
   try {
-    const isManager = req.user && ['Manager', 'Executive', 'Administrator'].includes(req.user.role);
+    const isSuperAdmin = req.user && req.user.role === 'Super Admin';
+    const isManager = req.user && ['Manager', 'Executive', 'Administrator', 'Super Admin'].includes(req.user.role);
     const userName = (req.user?.name || '').toLowerCase().trim();
     const userUsername = (req.user?.username || '').toLowerCase().trim();
     const userId = req.user?._id ? req.user._id.toString() : '';
@@ -31,10 +32,15 @@ router.get('/', protect, async (req, res) => {
           return isDirectRecipient;
         }
 
-        if (isManager || req.user?.role === 'Super Admin') {
-          return isDirectRecipient || n.forRole === 'Manager' || n.forRole === 'All';
+        // Direct recipient always sees notifications targeted to them (e.g. newly assigned leads or tasks)
+        if (isDirectRecipient) {
+          return true;
+        }
+
+        if (isManager || isSuperAdmin) {
+          return n.forRole === 'Manager' || n.forRole === 'All';
         } else {
-          return isDirectRecipient || n.forRole === 'All';
+          return n.forRole === 'User' || n.forRole === 'All';
         }
       });
 
@@ -52,22 +58,24 @@ router.get('/', protect, async (req, res) => {
       const regexName = escapeRegex(req.user?.name || '');
       const regexUsername = escapeRegex(req.user?.username || '');
 
-      if (isManager || req.user?.role === 'Super Admin') {
+      const directConditions = [
+        ...(userId ? [{ recipientUser: req.user._id }] : []),
+        ...(regexName ? [{ recipientName: new RegExp(`^${regexName}$`, 'i') }] : []),
+        ...(regexUsername ? [{ recipientName: new RegExp(`^${regexUsername}$`, 'i') }] : []),
+      ];
+
+      if (isManager || isSuperAdmin) {
         filter = {
           $or: [
-            { recipientUser: req.user._id },
-            { recipientName: new RegExp(regexName, 'i') },
-            { recipientName: new RegExp(regexUsername, 'i') },
+            ...directConditions,
             { forRole: { $in: ['Manager', 'All'] }, type: { $ne: 'task_completed' } },
           ],
         };
       } else {
         filter = {
           $or: [
-            { recipientUser: req.user._id },
-            { recipientName: new RegExp(regexName, 'i') },
-            { recipientName: new RegExp(regexUsername, 'i') },
-            { forRole: 'All', type: { $ne: 'task_completed' } },
+            ...directConditions,
+            { forRole: { $in: ['User', 'All'] }, type: { $ne: 'task_completed' } },
           ],
         };
       }
