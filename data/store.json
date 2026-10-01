@@ -179,7 +179,7 @@
       "name": "Sarfaraj Ahmad",
       "email": "sarfrajahamad068@gmail.com",
       "username": "sarfraj",
-      "password": "$2a$10$FdJJRBuipjbu9BPQsp8noulJkgqSrpOcGaMjqm5HYvTGUUZR2TUs6",
+      "password": "$2a$10$wRi5g9TYjCWSHbmj6FGdJ.zNK1z6sW3i4heWCWn6cpCMcPz6c1BnC",
       "role": "Super Admin",
       "department": "Executive Leadership",
       "avatar": "",
@@ -1242,6 +1242,28 @@
   ],
   "notifications": [
     {
+      "_id": "notif_57eef216",
+      "title": "⚡ Tier 3 SLA Escalation: Lead Auto-Unassigned",
+      "message": "Lead \"Aditi Sharma\" (Nexus Tech Global) was overdue by 60+ minutes from scheduled follow-up. Automatically unassigned from userviv2 and placed in High-Priority shared pool.",
+      "type": "sla_alert",
+      "priority": "Urgent",
+      "targetUser": null,
+      "targetRole": "Manager",
+      "read": false,
+      "createdAt": "2026-10-01T05:57:44.298Z"
+    },
+    {
+      "_id": "notif_11062d43",
+      "title": "⚡ Tier 3 SLA Escalation: Lead Auto-Unassigned",
+      "message": "Lead \"Aditi Sharma\" (Nexus Tech Global) was overdue by 60+ minutes from scheduled follow-up. Automatically unassigned from userviv2 and placed in High-Priority shared pool.",
+      "type": "sla_alert",
+      "priority": "Urgent",
+      "targetUser": null,
+      "targetRole": "Manager",
+      "read": false,
+      "createdAt": "2026-10-01T05:57:44.286Z"
+    },
+    {
       "_id": "notif_4c23ff4b",
       "title": "⚡ Tier 3 SLA Escalation: Lead Auto-Unassigned",
       "message": "Lead \"lead2\" (lead2 pvt ltd) was overdue by 60+ minutes from scheduled follow-up. Automatically unassigned from Harsh and placed in High-Priority shared pool.",
@@ -1433,13 +1455,13 @@
       "estimatedValue": 850000,
       "dealValue": 850000,
       "pipeline_value": 850000,
-      "assignedTo": "userviv2",
+      "assignedTo": "Unassigned (High-Priority Queue)",
       "assignedSalesUser": "userviv2",
       "assignedManager": "",
       "assignedManagerName": "",
       "assignedBy": "Sarfaraj Ahmad (Super Admin)",
       "assignedById": "64e8a1000000000000000001",
-      "user": "64e8a11ed58e6b00000000",
+      "user": null,
       "remarks": "Urgent enterprise lead from pricing contact form",
       "notes": "Urgent enterprise lead from pricing contact form",
       "lastContactDate": null,
@@ -1475,9 +1497,11 @@
       "convertedAt": null,
       "convertedBy": null,
       "convertedByName": "",
-      "sla_tier": 0,
+      "sla_tier": 3,
       "createdAt": "2026-09-28T12:29:35.138Z",
-      "updatedAt": "2026-09-28T12:29:35.138Z"
+      "updatedAt": "2026-10-01T05:57:44.286Z",
+      "sla_unassigned": true,
+      "is_high_priority_pool": true
     },
     {
       "_id": "64e8d135ee441f00000000",
@@ -1751,13 +1775,13 @@
       "estimatedValue": 850000,
       "dealValue": 850000,
       "pipeline_value": 850000,
-      "assignedTo": "userviv2",
+      "assignedTo": "Unassigned (High-Priority Queue)",
       "assignedSalesUser": "userviv2",
       "assignedManager": "",
       "assignedManagerName": "",
       "assignedBy": "Sarfaraj Ahmad (Super Admin)",
       "assignedById": "64e8a1000000000000000001",
-      "user": "64e8a11ed58e6b00000000",
+      "user": null,
       "remarks": "Urgent enterprise lead from pricing contact form",
       "notes": "Urgent enterprise lead from pricing contact form",
       "lastContactDate": null,
@@ -1793,9 +1817,11 @@
       "convertedAt": null,
       "convertedBy": null,
       "convertedByName": "",
-      "sla_tier": 0,
+      "sla_tier": 3,
       "createdAt": "2026-09-28T12:28:46.896Z",
-      "updatedAt": "2026-09-28T12:28:46.896Z"
+      "updatedAt": "2026-10-01T05:57:44.298Z",
+      "sla_unassigned": true,
+      "is_high_priority_pool": true
     },
     {
       "_id": "64e8d12fabd01e00000000",
@@ -3883,6 +3909,49 @@
   ],
   "projects": [
     {
+      "_id": "prj_1790834414942",
+      "projectCode": "PRJ-03-417",
+      "name": "Enterprise Cloud Transformation",
+      "clientName": "Global Corp Inc",
+      "description": "Migration to hybrid cloud with multi-region failover.",
+      "category": "Cloud Migration",
+      "status": "In Progress",
+      "priority": "High",
+      "budget": 85000,
+      "currency": "USD",
+      "startDate": "2026-10-01T06:00:14.942Z",
+      "targetDate": "2026-11-30T00:00:00.000Z",
+      "progress": 50,
+      "manager": null,
+      "managerName": "Sarfaraj Ahmad",
+      "teamMembers": [],
+      "milestones": [
+        {
+          "title": "Project Kickoff & Scope Alignment",
+          "isCompleted": true,
+          "completedAt": "2026-10-01T06:04:54.560Z"
+        },
+        {
+          "title": "Architecture & Design Approval",
+          "isCompleted": true,
+          "completedAt": "2026-10-01T06:04:57.542Z"
+        },
+        {
+          "title": "Core Implementation & QA Testing",
+          "isCompleted": false
+        },
+        {
+          "title": "Final Handover & Client Sign-off",
+          "isCompleted": false
+        }
+      ],
+      "deliverableTasks": [],
+      "attachments": [],
+      "createdBy": "64e8a1000000000000000001",
+      "createdAt": "2026-10-01T06:00:14.942Z",
+      "updatedAt": "2026-10-01T06:04:57.542Z"
+    },
+    {
       "_id": "prj_1789628619022",
       "projectCode": "PRJ-02-241",
       "name": "Dave Project Omega",
@@ -3895,7 +3964,7 @@
       "currency": "USD",
       "startDate": "2026-09-17T07:03:39.022Z",
       "targetDate": "2026-10-17T07:03:39.021Z",
-      "progress": 25,
+      "progress": 50,
       "manager": null,
       "managerName": "Unassigned",
       "teamMembers": [],
@@ -3907,7 +3976,8 @@
         },
         {
           "title": "Architecture & Design Approval",
-          "isCompleted": false
+          "isCompleted": true,
+          "completedAt": "2026-10-01T06:00:14.938Z"
         },
         {
           "title": "Core Implementation & QA Testing",
@@ -3921,7 +3991,7 @@
       "deliverableTasks": [],
       "createdBy": "64e8a1772c6c6100000000",
       "createdAt": "2026-09-17T07:03:39.022Z",
-      "updatedAt": "2026-09-17T07:03:39.022Z"
+      "updatedAt": "2026-10-01T06:00:14.938Z"
     },
     {
       "_id": "prj_1789628619011",
@@ -3966,6 +4036,290 @@
     }
   ],
   "auditLogs": [
+    {
+      "log_id": "aud_10a184c4aa3eb7ea",
+      "entity_type": "Lead",
+      "entity_id": "64e8d12f2f15ca00000000",
+      "action": "SLA_TIER3_UNASSIGNMENT",
+      "operator_id": "SYSTEM",
+      "operator_name": "System Daemon",
+      "operator_role": "System",
+      "prior_state": {
+        "_id": "64e8d12f2f15ca00000000",
+        "lead_id": "lead_58c669b8-3382-46e7-8fe8-a6d9a226ea7c",
+        "leadId": "LD-019",
+        "name": "Aditi Sharma",
+        "contactPerson": "Aditi Sharma",
+        "company": "Nexus Tech Global",
+        "phone": "+91 98765 43210",
+        "mobileNumber": "+91 98765 43210",
+        "email": "lead_1790598526894@nexustech.io",
+        "source": "Website",
+        "requirement": "ERP & Lead Tracking Suite with 50 Sales Licenses",
+        "status": "New",
+        "lead_status": "NEW",
+        "priority": "High",
+        "estimatedValue": 850000,
+        "dealValue": 850000,
+        "pipeline_value": 850000,
+        "assignedTo": "userviv2",
+        "assignedSalesUser": "userviv2",
+        "assignedManager": "",
+        "assignedManagerName": "",
+        "assignedBy": "Sarfaraj Ahmad (Super Admin)",
+        "assignedById": "64e8a1000000000000000001",
+        "user": "64e8a11ed58e6b00000000",
+        "remarks": "Urgent enterprise lead from pricing contact form",
+        "notes": "Urgent enterprise lead from pricing contact form",
+        "lastContactDate": null,
+        "nextFollowUpDate": "2026-10-01T00:00:00.000Z",
+        "nextFollowUpTime": "11:00 AM",
+        "next_followup_at": "2026-10-01T00:00:00.000Z",
+        "callLogs": [],
+        "followups": [
+          {
+            "followUpId": "FLW-1134",
+            "followUpDate": "2026-10-01T00:00:00.000Z",
+            "followUpTime": "11:00 AM",
+            "reason": "Initial follow-up scheduled upon lead creation",
+            "assignedTo": "userviv2",
+            "remarks": "Urgent enterprise lead from pricing contact form",
+            "status": "Pending",
+            "createdAt": "2026-09-28T12:28:46.896Z"
+          }
+        ],
+        "timeline": [
+          {
+            "eventId": "EVT-8084",
+            "eventType": "LEAD_CREATED",
+            "title": "Lead Created",
+            "description": "New lead created from Website for Nexus Tech Global.",
+            "author": "Sarfaraj Ahmad",
+            "authorId": "64e8a1000000000000000001",
+            "timestamp": "2026-09-28T12:28:46.896Z"
+          }
+        ],
+        "opportunityId": null,
+        "convertedOpportunityId": null,
+        "convertedAt": null,
+        "convertedBy": null,
+        "convertedByName": "",
+        "sla_tier": 0,
+        "createdAt": "2026-09-28T12:28:46.896Z",
+        "updatedAt": "2026-09-28T12:28:46.896Z"
+      },
+      "updated_state": {
+        "_id": "64e8d12f2f15ca00000000",
+        "lead_id": "lead_58c669b8-3382-46e7-8fe8-a6d9a226ea7c",
+        "leadId": "LD-019",
+        "name": "Aditi Sharma",
+        "contactPerson": "Aditi Sharma",
+        "company": "Nexus Tech Global",
+        "phone": "+91 98765 43210",
+        "mobileNumber": "+91 98765 43210",
+        "email": "lead_1790598526894@nexustech.io",
+        "source": "Website",
+        "requirement": "ERP & Lead Tracking Suite with 50 Sales Licenses",
+        "status": "New",
+        "lead_status": "NEW",
+        "priority": "High",
+        "estimatedValue": 850000,
+        "dealValue": 850000,
+        "pipeline_value": 850000,
+        "assignedTo": "Unassigned (High-Priority Queue)",
+        "assignedSalesUser": "userviv2",
+        "assignedManager": "",
+        "assignedManagerName": "",
+        "assignedBy": "Sarfaraj Ahmad (Super Admin)",
+        "assignedById": "64e8a1000000000000000001",
+        "user": null,
+        "remarks": "Urgent enterprise lead from pricing contact form",
+        "notes": "Urgent enterprise lead from pricing contact form",
+        "lastContactDate": null,
+        "nextFollowUpDate": "2026-10-01T00:00:00.000Z",
+        "nextFollowUpTime": "11:00 AM",
+        "next_followup_at": "2026-10-01T00:00:00.000Z",
+        "callLogs": [],
+        "followups": [
+          {
+            "followUpId": "FLW-1134",
+            "followUpDate": "2026-10-01T00:00:00.000Z",
+            "followUpTime": "11:00 AM",
+            "reason": "Initial follow-up scheduled upon lead creation",
+            "assignedTo": "userviv2",
+            "remarks": "Urgent enterprise lead from pricing contact form",
+            "status": "Pending",
+            "createdAt": "2026-09-28T12:28:46.896Z"
+          }
+        ],
+        "timeline": [
+          {
+            "eventId": "EVT-8084",
+            "eventType": "LEAD_CREATED",
+            "title": "Lead Created",
+            "description": "New lead created from Website for Nexus Tech Global.",
+            "author": "Sarfaraj Ahmad",
+            "authorId": "64e8a1000000000000000001",
+            "timestamp": "2026-09-28T12:28:46.896Z"
+          }
+        ],
+        "opportunityId": null,
+        "convertedOpportunityId": null,
+        "convertedAt": null,
+        "convertedBy": null,
+        "convertedByName": "",
+        "sla_tier": 3,
+        "createdAt": "2026-09-28T12:28:46.896Z",
+        "updatedAt": "2026-10-01T05:57:44.298Z",
+        "sla_unassigned": true,
+        "is_high_priority_pool": true
+      },
+      "delta": "SLA Tier 3 Breached: Overdue 357m. Auto-unassigned from userviv2.",
+      "ip_address": "127.0.0.1",
+      "timestamp": "2026-10-01T05:57:44.299Z"
+    },
+    {
+      "log_id": "aud_256a886038a58f13",
+      "entity_type": "Lead",
+      "entity_id": "64e8d14cede3ca00000000",
+      "action": "SLA_TIER3_UNASSIGNMENT",
+      "operator_id": "SYSTEM",
+      "operator_name": "System Daemon",
+      "operator_role": "System",
+      "prior_state": {
+        "_id": "64e8d14cede3ca00000000",
+        "lead_id": "lead_88ceca13-4f74-401a-8e63-68d63f02a5a7",
+        "leadId": "LD-022",
+        "name": "Aditi Sharma",
+        "contactPerson": "Aditi Sharma",
+        "company": "Nexus Tech Global",
+        "phone": "+91 98765 43210",
+        "mobileNumber": "+91 98765 43210",
+        "email": "lead_1790598575137@nexustech.io",
+        "source": "Website",
+        "requirement": "ERP & Lead Tracking Suite with 50 Sales Licenses",
+        "status": "New",
+        "lead_status": "NEW",
+        "priority": "High",
+        "estimatedValue": 850000,
+        "dealValue": 850000,
+        "pipeline_value": 850000,
+        "assignedTo": "userviv2",
+        "assignedSalesUser": "userviv2",
+        "assignedManager": "",
+        "assignedManagerName": "",
+        "assignedBy": "Sarfaraj Ahmad (Super Admin)",
+        "assignedById": "64e8a1000000000000000001",
+        "user": "64e8a11ed58e6b00000000",
+        "remarks": "Urgent enterprise lead from pricing contact form",
+        "notes": "Urgent enterprise lead from pricing contact form",
+        "lastContactDate": null,
+        "nextFollowUpDate": "2026-10-01T00:00:00.000Z",
+        "nextFollowUpTime": "11:00 AM",
+        "next_followup_at": "2026-10-01T00:00:00.000Z",
+        "callLogs": [],
+        "followups": [
+          {
+            "followUpId": "FLW-3325",
+            "followUpDate": "2026-10-01T00:00:00.000Z",
+            "followUpTime": "11:00 AM",
+            "reason": "Initial follow-up scheduled upon lead creation",
+            "assignedTo": "userviv2",
+            "remarks": "Urgent enterprise lead from pricing contact form",
+            "status": "Pending",
+            "createdAt": "2026-09-28T12:29:35.138Z"
+          }
+        ],
+        "timeline": [
+          {
+            "eventId": "EVT-9283",
+            "eventType": "LEAD_CREATED",
+            "title": "Lead Created",
+            "description": "New lead created from Website for Nexus Tech Global.",
+            "author": "Sarfaraj Ahmad",
+            "authorId": "64e8a1000000000000000001",
+            "timestamp": "2026-09-28T12:29:35.138Z"
+          }
+        ],
+        "opportunityId": null,
+        "convertedOpportunityId": null,
+        "convertedAt": null,
+        "convertedBy": null,
+        "convertedByName": "",
+        "sla_tier": 0,
+        "createdAt": "2026-09-28T12:29:35.138Z",
+        "updatedAt": "2026-09-28T12:29:35.138Z"
+      },
+      "updated_state": {
+        "_id": "64e8d14cede3ca00000000",
+        "lead_id": "lead_88ceca13-4f74-401a-8e63-68d63f02a5a7",
+        "leadId": "LD-022",
+        "name": "Aditi Sharma",
+        "contactPerson": "Aditi Sharma",
+        "company": "Nexus Tech Global",
+        "phone": "+91 98765 43210",
+        "mobileNumber": "+91 98765 43210",
+        "email": "lead_1790598575137@nexustech.io",
+        "source": "Website",
+        "requirement": "ERP & Lead Tracking Suite with 50 Sales Licenses",
+        "status": "New",
+        "lead_status": "NEW",
+        "priority": "High",
+        "estimatedValue": 850000,
+        "dealValue": 850000,
+        "pipeline_value": 850000,
+        "assignedTo": "Unassigned (High-Priority Queue)",
+        "assignedSalesUser": "userviv2",
+        "assignedManager": "",
+        "assignedManagerName": "",
+        "assignedBy": "Sarfaraj Ahmad (Super Admin)",
+        "assignedById": "64e8a1000000000000000001",
+        "user": null,
+        "remarks": "Urgent enterprise lead from pricing contact form",
+        "notes": "Urgent enterprise lead from pricing contact form",
+        "lastContactDate": null,
+        "nextFollowUpDate": "2026-10-01T00:00:00.000Z",
+        "nextFollowUpTime": "11:00 AM",
+        "next_followup_at": "2026-10-01T00:00:00.000Z",
+        "callLogs": [],
+        "followups": [
+          {
+            "followUpId": "FLW-3325",
+            "followUpDate": "2026-10-01T00:00:00.000Z",
+            "followUpTime": "11:00 AM",
+            "reason": "Initial follow-up scheduled upon lead creation",
+            "assignedTo": "userviv2",
+            "remarks": "Urgent enterprise lead from pricing contact form",
+            "status": "Pending",
+            "createdAt": "2026-09-28T12:29:35.138Z"
+          }
+        ],
+        "timeline": [
+          {
+            "eventId": "EVT-9283",
+            "eventType": "LEAD_CREATED",
+            "title": "Lead Created",
+            "description": "New lead created from Website for Nexus Tech Global.",
+            "author": "Sarfaraj Ahmad",
+            "authorId": "64e8a1000000000000000001",
+            "timestamp": "2026-09-28T12:29:35.138Z"
+          }
+        ],
+        "opportunityId": null,
+        "convertedOpportunityId": null,
+        "convertedAt": null,
+        "convertedBy": null,
+        "convertedByName": "",
+        "sla_tier": 3,
+        "createdAt": "2026-09-28T12:29:35.138Z",
+        "updatedAt": "2026-10-01T05:57:44.286Z",
+        "sla_unassigned": true,
+        "is_high_priority_pool": true
+      },
+      "delta": "SLA Tier 3 Breached: Overdue 357m. Auto-unassigned from userviv2.",
+      "ip_address": "127.0.0.1",
+      "timestamp": "2026-10-01T05:57:44.289Z"
+    },
     {
       "log_id": "aud_f62a843650d2eddf",
       "entity_type": "Lead",
@@ -12617,5 +12971,5 @@
     "renewalDate": "2027-09-16T09:22:46.923Z",
     "updatedAt": "2026-09-16T09:22:46.924Z"
   },
-  "savedAt": "2026-09-30T09:53:14.537Z"
+  "savedAt": "2026-10-01T07:09:26.810Z"
 }
