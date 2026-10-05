@@ -54,12 +54,56 @@ const getScopedUserIds = (requester, allUsers) => {
   return allowedIds;
 };
 
+// @route   GET /api/users/assignable
+// @desc    Get all active organization users for assignment dropdowns (Super Admin, Managers, Employees)
+// @access  Private
+router.get('/assignable', protect, async (req, res) => {
+  try {
+    let usersList = [];
+    if (fallbackStore.isFallback) {
+      usersList = (fallbackStore.users || [])
+        .filter((u) => u.status !== 'Rejected' && u.status !== 'Pending')
+        .map((u) => {
+          const userRoles = Array.isArray(u.roles) && u.roles.length > 0 ? u.roles : [u.role || 'User'];
+          return {
+            _id: u._id,
+            name: u.name,
+            email: u.email,
+            username: u.username,
+            role: u.role || userRoles[0],
+            roles: userRoles,
+            department: u.department || 'General',
+            avatar: u.avatar || '',
+            status: u.status || 'Approved',
+          };
+        });
+    } else {
+      usersList = await User.find({ status: { $nin: ['Rejected', 'Pending'] } })
+        .select('_id name username email role roles department avatar status')
+        .sort({ name: 1 })
+        .lean();
+    }
+
+    usersList.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+    return res.json({
+      success: true,
+      count: usersList.length,
+      users: usersList,
+    });
+  } catch (err) {
+    console.error('[Get Assignable Users Error]', err);
+    res.status(500).json({ success: false, message: 'Failed to fetch assignable users', error: err.message });
+  }
+});
+
 // @route   GET /api/users
 // @desc    Get users list with role-based scoping (Manager sees only assigned subordinates/members)
 // @access  Private
 router.get('/', protect, async (req, res) => {
   try {
-    const { search, role, department, status, reportsTo } = req.query;
+    const { search, role, department, status, reportsTo, scope, all } = req.query;
+    const isUnrestrictedScope = scope === 'all' || all === 'true';
 
     if (fallbackStore.isFallback) {
       let usersList = fallbackStore.users.map((u) => {
@@ -84,10 +128,12 @@ router.get('/', protect, async (req, res) => {
         };
       });
 
-      // Scope visibility based on requester role
-      const scopedIds = getScopedUserIds(req.user, fallbackStore.users);
-      if (scopedIds !== null) {
-        usersList = usersList.filter((u) => scopedIds.has(u._id ? u._id.toString() : ''));
+      // Scope visibility based on requester role (unless explicitly requesting all directory users)
+      if (!isUnrestrictedScope) {
+        const scopedIds = getScopedUserIds(req.user, fallbackStore.users);
+        if (scopedIds !== null) {
+          usersList = usersList.filter((u) => scopedIds.has(u._id ? u._id.toString() : ''));
+        }
       }
 
       // Filter by status: If not specified, exclude Rejected and Pending users from active employee lists
@@ -139,11 +185,13 @@ router.get('/', protect, async (req, res) => {
     } else {
       const queryObj = {};
 
-      // Scope visibility based on requester role in MongoDB
-      const allDbUsers = await User.find({}).select('_id name username email role reportsTo reportsToName createdBy').lean();
-      const scopedIds = getScopedUserIds(req.user, allDbUsers);
-      if (scopedIds !== null) {
-        queryObj._id = { $in: Array.from(scopedIds) };
+      // Scope visibility based on requester role in MongoDB (unless unrestricted)
+      if (!isUnrestrictedScope) {
+        const allDbUsers = await User.find({}).select('_id name username email role reportsTo reportsToName createdBy').lean();
+        const scopedIds = getScopedUserIds(req.user, allDbUsers);
+        if (scopedIds !== null) {
+          queryObj._id = { $in: Array.from(scopedIds) };
+        }
       }
 
       if (status && status !== 'all') {

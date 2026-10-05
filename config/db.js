@@ -24,6 +24,7 @@ const fallbackStore = {
   complaints: [],
   projects: [],
   auditLogs: [],
+  importHistory: [],
   subscription: {
     organizationName: 'TaskFlow Enterprise Client',
     activeModules: ['leads', 'complaints', 'projects'],
@@ -58,6 +59,7 @@ const fallbackStore = {
         complaints: this.complaints || [],
         projects: this.projects || [],
         auditLogs: this.auditLogs || [],
+        importHistory: this.importHistory || [],
         subscription: this.subscription || {
           organizationName: 'TaskFlow Enterprise Client',
           activeModules: ['leads', 'complaints', 'projects'],
@@ -86,6 +88,7 @@ const fallbackStore = {
           this.complaints = Array.isArray(parsed.complaints) ? parsed.complaints : [];
           this.projects = Array.isArray(parsed.projects) ? parsed.projects : [];
           this.auditLogs = Array.isArray(parsed.auditLogs) ? parsed.auditLogs : [];
+          this.importHistory = Array.isArray(parsed.importHistory) ? parsed.importHistory : [];
           if (parsed.subscription && typeof parsed.subscription === 'object') {
             this.subscription = parsed.subscription;
           }

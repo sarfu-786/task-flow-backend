@@ -7,7 +7,24 @@ const Notification = require('../models/Notification');
 const { protect } = require('../middleware/auth');
 const { fallbackStore } = require('../config/db');
 
-const VALID_TASK_TYPES = ['internet work', 'documentation', 'social media', 'backend work', 'sells', 'sales'];
+const VALID_TASK_TYPES = [
+  'internet work',
+  'documentation',
+  'social media',
+  'backend work',
+  'sells',
+  'sales',
+  'client communication',
+  'data entry',
+  'research & analysis',
+  'research and analysis',
+  'follow-up',
+  'follow up',
+  'testing & quality check',
+  'testing and quality check',
+  'administrative work',
+  'technical support',
+];
 const VALID_STATUSES = ['To Do', 'In Progress', 'Completed'];
 
 const {
@@ -563,11 +580,18 @@ router.get('/stats', protect, async (req, res) => {
     const completionRate = total > 0 ? Math.round((completed / total) * 100) : 0;
 
     const byType = {
-      'internet work': allTasks.filter((t) => t.taskType === 'internet work').length,
-      'documentation': allTasks.filter((t) => t.taskType === 'documentation').length,
-      'social media': allTasks.filter((t) => t.taskType === 'social media').length,
-      'backend work': allTasks.filter((t) => t.taskType === 'backend work').length,
-      'sells': allTasks.filter((t) => t.taskType === 'sells' || t.taskType === 'sales').length,
+      'internet work': allTasks.filter((t) => (t.taskType || '').toLowerCase() === 'internet work').length,
+      'documentation': allTasks.filter((t) => (t.taskType || '').toLowerCase() === 'documentation').length,
+      'social media': allTasks.filter((t) => (t.taskType || '').toLowerCase() === 'social media').length,
+      'backend work': allTasks.filter((t) => (t.taskType || '').toLowerCase() === 'backend work').length,
+      'client communication': allTasks.filter((t) => (t.taskType || '').toLowerCase() === 'client communication').length,
+      'data entry': allTasks.filter((t) => (t.taskType || '').toLowerCase() === 'data entry').length,
+      'research & analysis': allTasks.filter((t) => ['research & analysis', 'research and analysis'].includes((t.taskType || '').toLowerCase())).length,
+      'follow-up': allTasks.filter((t) => ['follow-up', 'follow up'].includes((t.taskType || '').toLowerCase())).length,
+      'testing & quality check': allTasks.filter((t) => ['testing & quality check', 'testing and quality check'].includes((t.taskType || '').toLowerCase())).length,
+      'administrative work': allTasks.filter((t) => (t.taskType || '').toLowerCase() === 'administrative work').length,
+      'technical support': allTasks.filter((t) => (t.taskType || '').toLowerCase() === 'technical support').length,
+      'sells': allTasks.filter((t) => ['sells', 'sales'].includes((t.taskType || '').toLowerCase())).length,
     };
 
     const now = new Date();
@@ -592,6 +616,50 @@ router.get('/stats', protect, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to retrieve task statistics',
+      error: error.message,
+    });
+  }
+});
+
+// @route   GET /api/tasks/:id
+// @desc    Get single task details with strict hierarchy permission check
+// @access  Private
+router.get('/:id', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+    let task = null;
+    let allUsers = [];
+
+    if (fallbackStore.isFallback) {
+      task = fallbackStore.tasks.find((t) => t._id && t._id.toString() === id.toString());
+      allUsers = fallbackStore.users || [];
+    } else {
+      if (mongoose.Types.ObjectId.isValid(id)) {
+        task = await Task.findById(id);
+      }
+      allUsers = await User.find({}).select('_id name username email role reportsTo reportsToName createdBy').lean();
+    }
+
+    if (!task) {
+      return res.status(404).json({ success: false, message: 'Task not found' });
+    }
+
+    if (!canUserAccessTask(req.user, task, allUsers)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied: You do not have permission to view this task',
+      });
+    }
+
+    return res.json({
+      success: true,
+      task,
+    });
+  } catch (error) {
+    console.error('Fetch task by ID error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch task details',
       error: error.message,
     });
   }
@@ -871,6 +939,14 @@ router.put('/:id', protect, async (req, res) => {
       }
 
       const existing = fallbackStore.tasks[taskIndex];
+      const allUsers = fallbackStore.users || [];
+      if (!canUserAccessTask(req.user, existing, allUsers)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied: You do not have permission to modify this task',
+        });
+      }
+
       const wasCompleted = existing.status === 'Completed';
       const isNowCompleted = status === 'Completed';
       const previousAssignee = existing.assignedTo;
@@ -922,6 +998,14 @@ router.put('/:id', protect, async (req, res) => {
         return res.status(404).json({ success: false, message: 'Task not found' });
       }
 
+      const allUsers = await User.find({}).select('_id name username email role reportsTo reportsToName createdBy').lean();
+      if (!canUserAccessTask(req.user, task, allUsers)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied: You do not have permission to modify this task',
+        });
+      }
+
       const wasCompleted = task.status === 'Completed';
       const isNowCompleted = status === 'Completed';
       const previousAssignee = task.assignedTo;
@@ -970,7 +1054,7 @@ router.put('/:id', protect, async (req, res) => {
       }
 
       if (io) {
-        io.emit('tasks:updated', { task, action: 'update' });
+        io.emit('tasks:updated', { task: task, action: 'update' });
         io.emit('stats:updated');
       }
 
@@ -1015,6 +1099,14 @@ router.patch('/:id/status', protect, async (req, res) => {
       }
 
       const existing = fallbackStore.tasks[taskIndex];
+      const allUsers = fallbackStore.users || [];
+      if (!canUserAccessTask(req.user, existing, allUsers)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied: You do not have permission to update the status of this task',
+        });
+      }
+
       const wasCompleted = existing.status === 'Completed';
 
       existing.status = status;
@@ -1042,22 +1134,17 @@ router.patch('/:id/status', protect, async (req, res) => {
         task: existing,
       });
     } else {
-      const updateData = {
-        status,
-        updatedAt: new Date(),
-      };
-      if (finalRemark) {
-        updateData.completionRemark = finalRemark;
-      }
-      if (status === 'Completed') {
-        updateData.completedAt = new Date();
-      } else {
-        updateData.completedAt = null;
-      }
-
       const task = await Task.findById(id);
       if (!task) {
         return res.status(404).json({ success: false, message: 'Task not found' });
+      }
+
+      const allUsers = await User.find({}).select('_id name username email role reportsTo reportsToName createdBy').lean();
+      if (!canUserAccessTask(req.user, task, allUsers)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied: You do not have permission to update the status of this task',
+        });
       }
 
       const wasCompleted = task.status === 'Completed';
@@ -1120,6 +1207,15 @@ router.delete('/:id', protect, async (req, res) => {
         return res.status(404).json({ success: false, message: 'Task not found' });
       }
 
+      const existing = fallbackStore.tasks[taskIndex];
+      const allUsers = fallbackStore.users || [];
+      if (!canUserAccessTask(req.user, existing, allUsers)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied: You do not have permission to delete this task',
+        });
+      }
+
       const deleted = fallbackStore.tasks.splice(taskIndex, 1)[0];
       fallbackStore.saveToFile();
 
@@ -1135,11 +1231,20 @@ router.delete('/:id', protect, async (req, res) => {
         task: deleted,
       });
     } else {
-      const task = await Task.findByIdAndDelete(id);
-
+      const task = await Task.findById(id);
       if (!task) {
         return res.status(404).json({ success: false, message: 'Task not found' });
       }
+
+      const allUsers = await User.find({}).select('_id name username email role reportsTo reportsToName createdBy').lean();
+      if (!canUserAccessTask(req.user, task, allUsers)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied: You do not have permission to delete this task',
+        });
+      }
+
+      await Task.findByIdAndDelete(id);
 
       try {
         const localIdx = fallbackStore.tasks.findIndex(t => t._id.toString() === id.toString());

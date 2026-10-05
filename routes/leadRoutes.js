@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const crypto = require('crypto');
+const XLSX = require('xlsx');
 const Lead = require('../models/Lead');
 const Opportunity = require('../models/Opportunity');
 const User = require('../models/User');
@@ -460,6 +461,804 @@ const createFollowUpNotification = async ({
     console.error('[Follow-Up Notification Helper Error]', err.message);
   }
 };
+
+// =========================================================================
+// LEAD EXCEL IMPORT & EXPORT SUITE (.XLSX ONLY)
+// =========================================================================
+
+// @route   GET /api/leads/excel/template
+// @route   GET /api/leads/excel/template
+// @desc    Download standard Excel (.xlsx) or CSV (.csv) Import Template with sample data and allowed values
+// @access  Private
+router.get('/excel/template', protect, (req, res) => {
+  try {
+    const format = (req.query.format || 'xlsx').toLowerCase();
+    const wb = XLSX.utils.book_new();
+
+    // Sheet 1: Template
+    const templateData = [
+      {
+        'Lead ID': '',
+        'Full Name *': 'Rahul Sharma',
+        'Email *': 'rahul.sharma@innovatecorp.com',
+        'Phone': '+91 9876543210',
+        'Company': 'Innovate Technologies Pvt Ltd',
+        'Job Title': 'Director of Engineering',
+        'Lead Source': 'Website',
+        'Status': 'New',
+        'Priority': 'High',
+        'Industry': 'Technology',
+        'Estimated Value (INR)': 250000,
+        'Assigned To': '',
+        'City': 'Bengaluru',
+        'Country': 'India',
+        'Requirement / Notes': 'Looking for enterprise CRM and task workflow automation.',
+      },
+      {
+        'Lead ID': '',
+        'Full Name *': 'Priya Nair',
+        'Email *': 'priya.nair@apexfin.com',
+        'Phone': '+91 9812345678',
+        'Company': 'Apex Financial Solutions',
+        'Job Title': 'Operations VP',
+        'Lead Source': 'Referral',
+        'Status': 'Contacted',
+        'Priority': 'Medium',
+        'Industry': 'Finance',
+        'Estimated Value (INR)': 180000,
+        'Assigned To': '',
+        'City': 'Mumbai',
+        'Country': 'India',
+        'Requirement / Notes': 'Requires SLA monitoring and departmental reporting.',
+      },
+      {
+        'Lead ID': '',
+        'Full Name *': 'Amit Verma',
+        'Email *': 'amit.verma@techglobal.org',
+        'Phone': '+91 9988776655',
+        'Company': 'Tech Global Solutions',
+        'Job Title': 'Chief Product Officer',
+        'Lead Source': 'LinkedIn',
+        'Status': 'Qualified',
+        'Priority': 'Urgent',
+        'Industry': 'Technology',
+        'Estimated Value (INR)': 420000,
+        'Assigned To': '',
+        'City': 'Hyderabad',
+        'Country': 'India',
+        'Requirement / Notes': 'Enterprise multi-team project and opportunity management setup.',
+      },
+    ];
+
+    const ws = XLSX.utils.json_to_sheet(templateData);
+    ws['!cols'] = [
+      { wch: 14 },
+      { wch: 22 },
+      { wch: 32 },
+      { wch: 18 },
+      { wch: 30 },
+      { wch: 24 },
+      { wch: 16 },
+      { wch: 14 },
+      { wch: 12 },
+      { wch: 18 },
+      { wch: 22 },
+      { wch: 20 },
+      { wch: 16 },
+      { wch: 14 },
+      { wch: 45 },
+    ];
+    XLSX.utils.book_append_sheet(wb, ws, 'Leads Template');
+
+    if (format === 'csv') {
+      const csvBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'csv' });
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="Lead_Import_Template.csv"');
+      return res.send(csvBuffer);
+    }
+
+    // Sheet 2: Reference Guide (for Excel)
+    const guideData = [
+      { 'Field': 'Lead ID', 'Mandatory': 'No (Only for Updates)', 'Description': 'Provide existing Lead ID (e.g. LD-001) to update an existing record. Leave blank to create a new lead.' },
+      { 'Field': 'Full Name *', 'Mandatory': 'YES', 'Description': 'Full name of the contact or prospect.' },
+      { 'Field': 'Email *', 'Mandatory': 'YES (or Phone)', 'Description': 'Valid email address. Used for duplicate detection and communications.' },
+      { 'Field': 'Phone', 'Mandatory': 'Optional (or Email)', 'Description': 'Contact telephone or mobile number with country code.' },
+      { 'Field': 'Company', 'Mandatory': 'Optional', 'Description': 'Organization or business account name.' },
+      { 'Field': 'Lead Source', 'Mandatory': 'Optional', 'Description': 'Allowed: Website, Justdial, Instamart, IndiaMART, TradeIndia, Google Ads, Meta Ads, LinkedIn, WhatsApp, Referral, Cold Call, Inbound Call, Email Campaign, Event / Expo, Walk-In, Other (Default: Website)' },
+      { 'Field': 'Status', 'Mandatory': 'Optional', 'Description': 'Allowed: New, Contacted, Follow-Up, Qualified, Interested, Converted, Not Interested, Invalid, In Progress, Lost (Default: New)' },
+      { 'Field': 'Priority', 'Mandatory': 'Optional', 'Description': 'Allowed: Low, Medium, High, Urgent (Default: Medium)' },
+      { 'Field': 'Industry', 'Mandatory': 'Optional', 'Description': 'Allowed: Technology, Finance, Healthcare, Manufacturing, Retail, Consulting, Real Estate, Education, Hospitality, Other' },
+      { 'Field': 'Estimated Value (INR)', 'Mandatory': 'Optional', 'Description': 'Numeric expected deal/pipeline value in INR.' },
+      { 'Field': 'Assigned To', 'Mandatory': 'Optional', 'Description': 'Name, email, or username of an authorized team member within your hierarchy. If left blank or unauthorized, defaults to you.' },
+    ];
+
+    const wsGuide = XLSX.utils.json_to_sheet(guideData);
+    wsGuide['!cols'] = [{ wch: 22 }, { wch: 25 }, { wch: 65 }];
+    XLSX.utils.book_append_sheet(wb, wsGuide, 'Guide & Allowed Values');
+
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="Lead_Import_Template.xlsx"');
+    return res.send(buffer);
+  } catch (err) {
+    console.error('Failed to generate Lead import template:', err);
+    return res.status(500).json({ success: false, message: 'Failed to generate Excel template' });
+  }
+});
+
+// @route   POST /api/leads/excel/preview
+// @desc    Validate and preview uploaded Excel/CSV file rows with column mapping support
+// @access  Private
+router.post('/excel/preview', protect, async (req, res) => {
+  try {
+    const { fileBase64, fileData, rows: clientRows, filename, fileName, mapping = {} } = req.body;
+    const resolvedName = fileName || filename || '';
+
+    if (resolvedName && !/\.(xlsx|xls|csv)$/i.test(resolvedName)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid file format. Supported formats: .xlsx, .xls, .csv',
+      });
+    }
+
+    let rawRows = [];
+    let detectedHeaders = [];
+    const payloadBuffer = fileData || fileBase64;
+
+    if (payloadBuffer) {
+      try {
+        const cleanBase64 = payloadBuffer.includes('base64,') ? payloadBuffer.split('base64,')[1] : payloadBuffer;
+        const fileBuffer = Buffer.from(cleanBase64, 'base64');
+        const wb = XLSX.read(fileBuffer, { type: 'buffer' });
+        if (!wb.SheetNames || wb.SheetNames.length === 0) {
+          return res.status(400).json({ success: false, message: 'The uploaded file contains no sheets or data.' });
+        }
+        const firstSheet = wb.Sheets[wb.SheetNames[0]];
+        rawRows = XLSX.utils.sheet_to_json(firstSheet, { defval: '' });
+
+        // Extract header names
+        const range = XLSX.utils.decode_range(firstSheet['!ref'] || 'A1:Z1');
+        for (let C = range.s.c; C <= range.e.c; ++C) {
+          const cell = firstSheet[XLSX.utils.encode_cell({ c: C, r: range.s.r })];
+          if (cell && cell.v !== undefined && String(cell.v).trim()) {
+            detectedHeaders.push(String(cell.v).trim());
+          }
+        }
+      } catch (parseErr) {
+        return res.status(400).json({ success: false, message: 'Failed to parse file: ' + parseErr.message });
+      }
+    } else if (Array.isArray(clientRows)) {
+      rawRows = clientRows;
+    } else {
+      return res.status(400).json({ success: false, message: 'No file data or rows provided.' });
+    }
+
+    if (!rawRows || rawRows.length === 0) {
+      return res.status(400).json({ success: false, message: 'The uploaded file contains no data rows.' });
+    }
+
+    if (detectedHeaders.length === 0 && rawRows[0]) {
+      detectedHeaders = Object.keys(rawRows[0]);
+    }
+
+    // Get current user accessible leads and all system users for hierarchy checking
+    let existingLeads = [];
+    let allUsers = [];
+    if (fallbackStore.isFallback) {
+      existingLeads = fallbackStore.leads || [];
+      allUsers = fallbackStore.users || [];
+    } else {
+      existingLeads = await Lead.find({}).lean();
+      allUsers = await User.find({}).lean();
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const phoneRegex = /^[\+]?[(]?[0-9]{3}[)]?[-\s\.]?[0-9]{3}[-\s\.]?[0-9]{4,6}$/;
+    let validCount = 0;
+    let invalidCount = 0;
+    let duplicateCount = 0;
+    let missingRequiredCount = 0;
+
+    const validatedRows = [];
+
+    for (let idx = 0; idx < rawRows.length; idx++) {
+      const rawRow = rawRows[idx];
+      const rowIndex = idx + 1;
+      const errors = [];
+      const warnings = [];
+
+      // Map flexible header keys according to mapping or auto-detection
+      const leadId = String((mapping.leadId ? rawRow[mapping.leadId] : null) || rawRow['Lead ID'] || rawRow['leadId'] || rawRow['lead_id'] || rawRow['ID'] || '').trim();
+      const name = String((mapping.name ? rawRow[mapping.name] : null) || rawRow['Full Name *'] || rawRow['Full Name'] || rawRow['Name'] || rawRow['name'] || rawRow['Lead Name'] || rawRow['Contact Name'] || '').trim();
+      const email = String((mapping.email ? rawRow[mapping.email] : null) || rawRow['Email *'] || rawRow['Email'] || rawRow['email'] || rawRow['Email Address'] || '').trim().toLowerCase();
+      const phone = String((mapping.phone ? rawRow[mapping.phone] : null) || rawRow['Phone'] || rawRow['Mobile'] || rawRow['phone'] || rawRow['Mobile Number'] || rawRow['Phone Number'] || '').trim();
+      const company = String((mapping.company ? rawRow[mapping.company] : null) || rawRow['Company'] || rawRow['Organization'] || rawRow['company'] || rawRow['Account Name'] || '').trim();
+      const jobTitle = String((mapping.jobTitle ? rawRow[mapping.jobTitle] : null) || rawRow['Job Title'] || rawRow['Title'] || rawRow['Designation'] || '').trim();
+      let source = String((mapping.source ? rawRow[mapping.source] : null) || rawRow['Lead Source'] || rawRow['Source'] || rawRow['source'] || 'Website').trim();
+      let status = String((mapping.status ? rawRow[mapping.status] : null) || rawRow['Status'] || rawRow['status'] || rawRow['Lead Status'] || 'New').trim();
+      let priority = String((mapping.priority ? rawRow[mapping.priority] : null) || rawRow['Priority'] || rawRow['priority'] || 'Medium').trim();
+      let industry = String((mapping.industry ? rawRow[mapping.industry] : null) || rawRow['Industry'] || rawRow['industry'] || 'Technology').trim();
+      const rawValue = (mapping.estimatedValue ? rawRow[mapping.estimatedValue] : null) || rawRow['Estimated Value (INR)'] || rawRow['Estimated Value'] || rawRow['Deal Value'] || rawRow['Value'] || rawRow['Amount'] || 0;
+      const estimatedValue = isNaN(Number(rawValue)) ? 0 : Number(rawValue);
+      const assignedToRaw = String((mapping.assignedTo ? rawRow[mapping.assignedTo] : null) || rawRow['Assigned To'] || rawRow['assignedTo'] || rawRow['Owner'] || rawRow['Assigned User'] || '').trim();
+      const city = String((mapping.city ? rawRow[mapping.city] : null) || rawRow['City'] || rawRow['city'] || '').trim();
+      const country = String((mapping.country ? rawRow[mapping.country] : null) || rawRow['Country'] || rawRow['country'] || 'India').trim();
+      const notes = String((mapping.notes ? rawRow[mapping.notes] : null) || rawRow['Requirement / Notes'] || rawRow['Requirement'] || rawRow['Notes'] || rawRow['requirement'] || rawRow['Remarks'] || '').trim();
+
+      // Required field validation
+      const isMissingReq = !name || (!email && !phone);
+      if (isMissingReq) {
+        missingRequiredCount++;
+      }
+
+      if (!name) {
+        errors.push('Lead / Contact Name is required.');
+      }
+      if (!email && !phone) {
+        errors.push('Either Email Address or Phone Number is required.');
+      } else {
+        if (email && !emailRegex.test(email)) {
+          errors.push(`Invalid email format: '${email}'`);
+        }
+        if (phone && phone.replace(/\D/g, '').length < 7) {
+          warnings.push(`Phone number appears short: '${phone}'`);
+        }
+      }
+
+      // Normalization of enum fields
+      if (!VALID_STATUSES.includes(status)) {
+        status = 'New';
+      }
+      if (!VALID_PRIORITIES.includes(priority)) {
+        priority = 'Medium';
+      }
+
+      // Duplicate Check
+      let existingMatch = null;
+      if (leadId) {
+        existingMatch = existingLeads.find((l) => (l.leadId && l.leadId.toLowerCase() === leadId.toLowerCase()) || (l.lead_id && l.lead_id.toLowerCase() === leadId.toLowerCase()));
+      }
+      if (!existingMatch && email) {
+        existingMatch = existingLeads.find((l) => l.email && l.email.toLowerCase() === email);
+      }
+      if (!existingMatch && phone) {
+        const cleanPhone = phone.replace(/\D/g, '');
+        if (cleanPhone.length >= 7) {
+          existingMatch = existingLeads.find((l) => {
+            const p = (l.phone || l.mobileNumber || '').replace(/\D/g, '');
+            return p && p === cleanPhone;
+          });
+        }
+      }
+
+      const isDuplicate = !!existingMatch;
+      if (isDuplicate) {
+        duplicateCount++;
+        warnings.push(`Existing record detected (${existingMatch.leadId || existingMatch.name}). Will be updated if Update/Upsert mode is selected.`);
+      }
+
+      // Hierarchy assignment check
+      let resolvedAssignedTo = req.user.name || req.user.username;
+      let resolvedAssignedToId = req.user._id;
+
+      if (assignedToRaw) {
+        const cleanTarget = assignedToRaw.toLowerCase();
+        const targetUser = allUsers.find(
+          (u) =>
+            (u.name && u.name.toLowerCase() === cleanTarget) ||
+            (u.username && u.username.toLowerCase() === cleanTarget) ||
+            (u.email && u.email.toLowerCase() === cleanTarget) ||
+            (u._id && u._id.toString() === assignedToRaw)
+        );
+
+        if (targetUser) {
+          const assignCheck = await validateHierarchyAssignment(req.user, targetUser._id);
+          if (assignCheck.valid) {
+            resolvedAssignedTo = targetUser.name || targetUser.username;
+            resolvedAssignedToId = targetUser._id;
+          } else {
+            warnings.push(`Hierarchy Constraint: Cannot assign to '${targetUser.name}'. Defaulting assignment to you (${req.user.name}).`);
+          }
+        } else {
+          warnings.push(`User '${assignedToRaw}' not found in organization. Defaulting to you.`);
+        }
+      }
+
+      const isValid = errors.length === 0;
+      if (isValid) validCount++;
+      else invalidCount++;
+
+      validatedRows.push({
+        rowIndex,
+        leadId: leadId || (existingMatch ? existingMatch.leadId : ''),
+        name,
+        email,
+        phone,
+        company,
+        jobTitle,
+        source,
+        status,
+        priority,
+        industry,
+        estimatedValue,
+        assignedTo: resolvedAssignedTo,
+        assignedToId: resolvedAssignedToId,
+        city,
+        country,
+        notes,
+        isValid,
+        validationStatus: !isValid ? 'error' : isDuplicate ? 'warning' : 'valid',
+        errors,
+        warnings,
+        isDuplicate,
+        existingId: existingMatch ? existingMatch._id : null,
+      });
+    }
+
+    return res.json({
+      success: true,
+      headers: detectedHeaders,
+      rawRows: rawRows.slice(0, 5),
+      totalRows: validatedRows.length,
+      validCount,
+      invalidCount,
+      duplicateCount,
+      missingRequiredCount,
+      rows: validatedRows,
+    });
+  } catch (err) {
+    console.error('Lead Excel preview error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to process file preview: ' + err.message });
+  }
+});
+
+// @route   POST /api/leads/excel/import
+// @desc    Execute batch import of valid Lead records from preview
+// @access  Private
+router.post('/excel/import', protect, async (req, res) => {
+  try {
+    const { rows, mode = 'create' } = req.body;
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ success: false, message: 'No rows provided for import.' });
+    }
+
+    let createdCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    const errors = [];
+    const importedLeads = [];
+
+    let allUsers = [];
+    if (fallbackStore.isFallback) {
+      allUsers = fallbackStore.users || [];
+    } else {
+      allUsers = await User.find({}).lean();
+    }
+
+    for (const row of rows) {
+      if (!row.name || (!row.email && !row.phone)) {
+        skippedCount++;
+        continue;
+      }
+
+      try {
+        if (fallbackStore.isFallback) {
+          if (!fallbackStore.leads) fallbackStore.leads = [];
+
+          let existingIndex = -1;
+          if (row.existingId) {
+            existingIndex = fallbackStore.leads.findIndex((l) => l._id && l._id.toString() === row.existingId.toString());
+          }
+          if (existingIndex === -1 && row.leadId) {
+            existingIndex = fallbackStore.leads.findIndex((l) => l.leadId && l.leadId.toLowerCase() === row.leadId.toLowerCase());
+          }
+          if (existingIndex === -1 && row.email) {
+            existingIndex = fallbackStore.leads.findIndex((l) => l.email && l.email.toLowerCase() === row.email.toLowerCase());
+          }
+
+          if (existingIndex !== -1) {
+            if (mode === 'update' || mode === 'upsert') {
+              const existing = fallbackStore.leads[existingIndex];
+              // Check permission to update
+              if (!canUserAccessLead(req.user, existing, allUsers)) {
+                skippedCount++;
+                errors.push(`Access denied for updating lead ${existing.leadId || row.name}`);
+                continue;
+              }
+
+              const updatedLead = {
+                ...existing,
+                name: row.name || existing.name,
+                contactPerson: row.name || existing.contactPerson,
+                email: row.email || existing.email,
+                phone: row.phone || existing.phone,
+                mobileNumber: row.phone || existing.mobileNumber,
+                company: row.company || existing.company,
+                jobTitle: row.jobTitle || existing.jobTitle,
+                source: row.source || existing.source,
+                status: row.status || existing.status,
+                priority: row.priority || existing.priority,
+                industry: row.industry || existing.industry,
+                estimatedValue: row.estimatedValue !== undefined ? Number(row.estimatedValue) : existing.estimatedValue,
+                dealValue: row.estimatedValue !== undefined ? Number(row.estimatedValue) : existing.dealValue,
+                requirement: row.notes || existing.requirement,
+                city: row.city || existing.city,
+                country: row.country || existing.country,
+                updatedAt: new Date().toISOString(),
+              };
+
+              fallbackStore.leads[existingIndex] = updatedLead;
+              updatedCount++;
+              importedLeads.push(updatedLead);
+            } else {
+              // Duplicate skipped
+              skippedCount++;
+              errors.push(`Duplicate skipped: Lead '${row.name}' (${fallbackStore.leads[existingIndex].leadId || row.email || row.phone}) already exists.`);
+              continue;
+            }
+          } else {
+            // Create mode
+            const newLeadId = await generateNextLeadId();
+            const leadDocId = '64e8c3' + Math.random().toString(16).substring(2, 10) + '00000000'.substring(0, 10);
+            const newLead = {
+              _id: leadDocId,
+              lead_id: 'lead_' + crypto.randomUUID(),
+              leadId: newLeadId,
+              name: row.name,
+              contactPerson: row.name,
+              email: row.email || '',
+              phone: row.phone || '',
+              mobileNumber: row.phone || '',
+              company: row.company || '',
+              jobTitle: row.jobTitle || '',
+              source: row.source || 'Website',
+              status: row.status || 'New',
+              priority: row.priority || 'Medium',
+              industry: row.industry || 'Technology',
+              estimatedValue: Number(row.estimatedValue) || 0,
+              dealValue: Number(row.estimatedValue) || 0,
+              assignedTo: row.assignedTo || req.user.name || 'Unassigned',
+              assigned_to: row.assignedTo || req.user.name || 'Unassigned',
+              assignedManager: req.user.role === 'Manager' ? req.user.name : (req.user.reportsToName || ''),
+              requirement: row.notes || '',
+              city: row.city || '',
+              country: row.country || 'India',
+              createdBy: req.user._id || req.user.id,
+              createdByName: req.user.name || req.user.username,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              activities: [
+                {
+                  id: 'act_' + Date.now(),
+                  type: 'Created',
+                  subject: 'Lead Imported via Excel/CSV',
+                  content: `Lead created via bulk import by ${req.user.name || req.user.username}.`,
+                  performedBy: req.user.name || req.user.username,
+                  timestamp: new Date().toISOString(),
+                },
+              ],
+            };
+
+            fallbackStore.leads.unshift(newLead);
+            createdCount++;
+            importedLeads.push(newLead);
+          }
+        } else {
+          // MongoDB Live Store
+          let existing = null;
+          if (row.existingId) existing = await Lead.findById(row.existingId);
+          if (!existing && row.leadId) existing = await Lead.findOne({ leadId: row.leadId });
+          if (!existing && row.email) existing = await Lead.findOne({ email: row.email });
+          if (!existing && row.phone) {
+            const cleanPhone = row.phone.replace(/\D/g, '');
+            if (cleanPhone.length >= 7) {
+              existing = await Lead.findOne({
+                $or: [{ phone: row.phone }, { mobileNumber: row.phone }],
+              });
+            }
+          }
+
+          if (existing) {
+            if (mode === 'update' || mode === 'upsert') {
+              if (!canUserAccessLead(req.user, existing.toObject(), allUsers)) {
+                skippedCount++;
+                errors.push(`Access denied for updating lead ${existing.leadId || row.name}`);
+                continue;
+              }
+
+              existing.name = row.name || existing.name;
+              existing.contactPerson = row.name || existing.contactPerson;
+              if (row.email) existing.email = row.email;
+              if (row.phone) existing.phone = row.phone;
+              if (row.company) existing.company = row.company;
+              if (row.jobTitle) existing.jobTitle = row.jobTitle;
+              if (row.source) existing.source = row.source;
+              if (row.status) existing.status = row.status;
+              if (row.priority) existing.priority = row.priority;
+              if (row.industry) existing.industry = row.industry;
+              if (row.estimatedValue !== undefined) {
+                existing.estimatedValue = Number(row.estimatedValue);
+                existing.dealValue = Number(row.estimatedValue);
+              }
+              if (row.notes) existing.requirement = row.notes;
+              if (row.city) existing.city = row.city;
+              if (row.country) existing.country = row.country;
+              existing.updatedAt = new Date();
+
+              await existing.save();
+              updatedCount++;
+              importedLeads.push(existing.toObject());
+            } else {
+              // Duplicate skipped
+              skippedCount++;
+              errors.push(`Duplicate skipped: Lead '${row.name}' (${existing.leadId || row.email || row.phone}) already exists.`);
+              continue;
+            }
+          } else {
+            const nextLeadId = await generateNextLeadId();
+            const created = await Lead.create({
+              name: row.name,
+              contactPerson: row.name,
+              email: row.email || '',
+              phone: row.phone || '',
+              mobileNumber: row.phone || '',
+              company: row.company || '',
+              jobTitle: row.jobTitle || '',
+              leadId: nextLeadId,
+              source: row.source || 'Website',
+              status: row.status || 'New',
+              priority: row.priority || 'Medium',
+              industry: row.industry || 'Technology',
+              estimatedValue: Number(row.estimatedValue) || 0,
+              dealValue: Number(row.estimatedValue) || 0,
+              assignedTo: row.assignedTo || req.user.name || 'Unassigned',
+              assigned_to: row.assignedTo || req.user.name || 'Unassigned',
+              assignedManager: req.user.role === 'Manager' ? req.user.name : (req.user.reportsToName || ''),
+              requirement: row.notes || '',
+              city: row.city || '',
+              country: row.country || 'India',
+              createdBy: req.user._id,
+              createdByName: req.user.name || req.user.username,
+              activities: [
+                {
+                  id: 'act_' + Date.now(),
+                  type: 'Created',
+                  subject: 'Lead Imported via Excel/CSV',
+                  content: `Lead created via bulk import by ${req.user.name || req.user.username}.`,
+                  performedBy: req.user.name || req.user.username,
+                  timestamp: new Date(),
+                },
+              ],
+            });
+            createdCount++;
+            importedLeads.push(created.toObject());
+          }
+        }
+      } catch (rowErr) {
+        skippedCount++;
+        errors.push(`Row ${row.rowIndex || ''} (${row.name}): ${rowErr.message}`);
+      }
+    }
+
+    if (fallbackStore.isFallback) {
+      fallbackStore.saveToFile();
+    }
+
+    // Save history record
+    const historyEntry = {
+      id: 'imp_' + Date.now(),
+      entityType: 'Lead',
+      type: 'IMPORT',
+      filename: req.body.filename || 'leads_import.xlsx',
+      mode,
+      totalRows: rows.length,
+      createdCount,
+      updatedCount,
+      skippedCount,
+      performedBy: req.user.name || req.user.username,
+      performedById: req.user._id,
+      timestamp: new Date().toISOString(),
+      status: errors.length > 0 && createdCount === 0 && updatedCount === 0 ? 'Failed' : 'Completed',
+    };
+
+    if (!fallbackStore.importHistory) fallbackStore.importHistory = [];
+    fallbackStore.importHistory.unshift(historyEntry);
+    fallbackStore.saveToFile();
+
+    await logAuditAction({
+      entity_type: 'Lead',
+      entity_id: 'EXCEL_BATCH_IMPORT',
+      action: 'IMPORT_EXCEL',
+      operator: req.user,
+      delta: `Imported ${createdCount} created, ${updatedCount} updated, ${skippedCount} skipped from Excel`,
+      req,
+    });
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('leads:updated', { action: 'imported', createdCount, updatedCount });
+      io.emit('notification:new', {
+        title: '📊 Leads Excel Import Completed',
+        message: `${createdCount} leads created, ${updatedCount} updated by ${req.user.name}.`,
+        type: 'system',
+        createdAt: new Date(),
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: `Import completed: ${createdCount} created, ${updatedCount} updated, ${skippedCount} skipped.`,
+      createdCount,
+      updatedCount,
+      skippedCount,
+      totalProcessed: rows.length,
+      errors,
+    });
+  } catch (err) {
+    console.error('Lead Excel import error:', err);
+    return res.status(500).json({ success: false, message: 'Import execution failed: ' + err.message });
+  }
+});
+
+// @route   POST /api/leads/excel/export or GET /api/leads/excel/export
+// @desc    Export filtered / selected / all accessible leads strictly adhering to hierarchy
+// @access  Private
+router.all('/excel/export', protect, async (req, res) => {
+  try {
+    const isPost = req.method === 'POST';
+    const params = isPost ? req.body : req.query;
+    const { selectedIds, search, status, priority, source, assignedTo, conversionStatus } = params;
+
+    let leads = [];
+    let allUsers = [];
+
+    if (fallbackStore.isFallback) {
+      leads = fallbackStore.leads || [];
+      allUsers = fallbackStore.users || [];
+    } else {
+      leads = await Lead.find({}).lean();
+      allUsers = await User.find({}).lean();
+    }
+
+    const scope = getUserScopeContext(req.user, allUsers);
+    if (!scope.isSuperAdmin) {
+      leads = leads.filter((l) => isLeadAccessible(scope, l));
+    }
+
+    // Filter by selected IDs if specified
+    if (Array.isArray(selectedIds) && selectedIds.length > 0) {
+      leads = leads.filter((l) => selectedIds.includes(l._id?.toString()) || selectedIds.includes(l.leadId) || selectedIds.includes(l.lead_id));
+    } else {
+      // Apply active filters
+      if (status && status !== 'all') {
+        leads = leads.filter((l) => l.status === status);
+      }
+      if (priority && priority !== 'all') {
+        leads = leads.filter((l) => l.priority === priority);
+      }
+      if (source && source !== 'all') {
+        leads = leads.filter((l) => l.source === source);
+      }
+      if (assignedTo && assignedTo !== 'all') {
+        leads = leads.filter((l) => l.assignedTo === assignedTo || l.assigned_to === assignedTo);
+      }
+      if (conversionStatus && conversionStatus !== 'all') {
+        if (conversionStatus === 'converted') {
+          leads = leads.filter((l) => l.status === 'Converted' || !!l.opportunityId || !!l.convertedOpportunityId);
+        } else if (conversionStatus === 'unconverted') {
+          leads = leads.filter((l) => l.status !== 'Converted');
+        }
+      }
+      if (search && search.trim()) {
+        const q = search.trim().toLowerCase();
+        leads = leads.filter(
+          (l) =>
+            (l.name && l.name.toLowerCase().includes(q)) ||
+            (l.company && l.company.toLowerCase().includes(q)) ||
+            (l.email && l.email.toLowerCase().includes(q)) ||
+            (l.phone && l.phone.toLowerCase().includes(q)) ||
+            (l.leadId && l.leadId.toLowerCase().includes(q))
+        );
+      }
+    }
+
+    const wb = XLSX.utils.book_new();
+
+    const exportRows = leads.map((l, idx) => ({
+      '#': idx + 1,
+      'Lead ID': l.leadId || l.lead_id || `LD-${idx + 1}`,
+      'Full Name': l.name || l.contactPerson || '',
+      'Email': l.email || '',
+      'Phone': l.phone || l.mobileNumber || '',
+      'Company': l.company || '',
+      'Job Title': l.jobTitle || '',
+      'Lead Source': l.source || '',
+      'Status': l.status || 'New',
+      'Priority': l.priority || 'Medium',
+      'Industry': l.industry || '',
+      'Estimated Value (INR)': Number(l.estimatedValue || l.dealValue || 0),
+      'Assigned To': l.assignedTo || l.assigned_to || 'Unassigned',
+      'Assigned Manager': l.assignedManager || '',
+      'City': l.city || '',
+      'Country': l.country || 'India',
+      'Requirement': l.requirement || '',
+      'Created Date': l.createdAt ? new Date(l.createdAt).toLocaleDateString('en-IN') : '',
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(exportRows);
+    ws['!cols'] = [
+      { wch: 6 },
+      { wch: 14 },
+      { wch: 22 },
+      { wch: 30 },
+      { wch: 18 },
+      { wch: 26 },
+      { wch: 20 },
+      { wch: 16 },
+      { wch: 14 },
+      { wch: 12 },
+      { wch: 18 },
+      { wch: 20 },
+      { wch: 20 },
+      { wch: 20 },
+      { wch: 16 },
+      { wch: 14 },
+      { wch: 35 },
+      { wch: 16 },
+    ];
+
+    XLSX.utils.book_append_sheet(wb, ws, 'Leads Export');
+
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    // Record export history
+    const historyEntry = {
+      id: 'exp_' + Date.now(),
+      entityType: 'Lead',
+      type: 'EXPORT',
+      filename: `Leads_Export_${new Date().toISOString().slice(0, 10)}.xlsx`,
+      recordsCount: exportRows.length,
+      performedBy: req.user.name || req.user.username,
+      performedById: req.user._id,
+      timestamp: new Date().toISOString(),
+      status: 'Completed',
+    };
+
+    if (!fallbackStore.importHistory) fallbackStore.importHistory = [];
+    fallbackStore.importHistory.unshift(historyEntry);
+    fallbackStore.saveToFile();
+
+    await logAuditAction({
+      entity_type: 'Lead',
+      entity_id: 'EXCEL_EXPORT',
+      action: 'EXPORT_EXCEL',
+      operator: req.user,
+      delta: `Exported ${exportRows.length} lead records to Excel (.xlsx)`,
+      req,
+    });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="Leads_Export_${new Date().toISOString().slice(0, 10)}.xlsx"`);
+    return res.send(buffer);
+  } catch (err) {
+    console.error('Lead Excel export error:', err);
+    return res.status(500).json({ success: false, message: 'Export failed: ' + err.message });
+  }
+});
+
+// @route   GET /api/leads/excel/history
+// @desc    Get import/export history for Leads
+// @access  Private
+router.get('/excel/history', protect, async (req, res) => {
+  try {
+    const history = (fallbackStore.importHistory || []).filter((h) => h.entityType === 'Lead');
+    return res.json({ success: true, history });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to fetch import history' });
+  }
+});
 
 // @route   GET /api/leads
 // @desc    Get all leads with role-based filtering, search, status, priority, manager, assignedTo, dates, and conversion status

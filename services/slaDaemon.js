@@ -1,4 +1,5 @@
 const Lead = require('../models/Lead');
+const Complaint = require('../models/Complaint');
 const Notification = require('../models/Notification');
 const { fallbackStore } = require('../config/db');
 const { logAuditAction } = require('./auditService');
@@ -18,7 +19,89 @@ const initSLADaemon = (io) => {
 
   // Run initial check immediately, then every 30 seconds
   runSLACheck();
-  daemonInterval = setInterval(runSLACheck, 30000);
+  runComplaintSLACheck();
+  daemonInterval = setInterval(() => {
+    runSLACheck();
+    runComplaintSLACheck();
+  }, 30000);
+};
+
+const runComplaintSLACheck = async () => {
+  try {
+    const now = new Date();
+    const nowMs = now.getTime();
+
+    if (fallbackStore.isFallback) {
+      const complaints = fallbackStore.complaints || [];
+      let updated = false;
+
+      for (const c of complaints) {
+        if (!c || ['Resolved', 'Closed', 'Cancelled'].includes(c.status)) continue;
+        if (c.status === 'Awaiting Customer' || c.isPaused) continue;
+        if (!c.slaDeadline) continue;
+
+        const deadlineMs = new Date(c.slaDeadline).getTime();
+        const diffHours = (deadlineMs - nowMs) / (1000 * 60 * 60);
+
+        if (diffHours < 0 && c.slaStatus !== 'Breached') {
+          c.slaStatus = 'Breached';
+          updated = true;
+          createSystemNotification({
+            title: `🚨 SLA Breached: Ticket ${c.ticketNumber}`,
+            message: `Complaint from "${c.customerName}" (${c.subject}) has breached SLA resolution deadline.`,
+            type: 'complaint_escalated',
+            priority: 'Urgent',
+            targetRole: 'Manager',
+          });
+          if (ioInstance) {
+            ioInstance.emit('complaint_updated', c);
+          }
+        } else if (diffHours >= 0 && diffHours <= 4 && c.slaStatus === 'On Track') {
+          c.slaStatus = 'At Risk';
+          updated = true;
+          if (ioInstance) {
+            ioInstance.emit('complaint_updated', c);
+          }
+        }
+      }
+
+      if (updated) fallbackStore.saveToFile();
+    } else {
+      const activeComplaints = await Complaint.find({
+        status: { $nin: ['Resolved', 'Closed', 'Cancelled', 'Awaiting Customer'] },
+        isPaused: { $ne: true },
+        slaDeadline: { $ne: null },
+      });
+
+      for (const c of activeComplaints) {
+        const deadlineMs = new Date(c.slaDeadline).getTime();
+        const diffHours = (deadlineMs - nowMs) / (1000 * 60 * 60);
+
+        if (diffHours < 0 && c.slaStatus !== 'Breached') {
+          c.slaStatus = 'Breached';
+          await c.save();
+          createSystemNotification({
+            title: `🚨 SLA Breached: Ticket ${c.ticketNumber}`,
+            message: `Complaint from "${c.customerName}" (${c.subject}) has breached SLA resolution deadline.`,
+            type: 'complaint_escalated',
+            priority: 'Urgent',
+            targetRole: 'Manager',
+          });
+          if (ioInstance) {
+            ioInstance.emit('complaint_updated', c.toObject());
+          }
+        } else if (diffHours >= 0 && diffHours <= 4 && c.slaStatus === 'On Track') {
+          c.slaStatus = 'At Risk';
+          await c.save();
+          if (ioInstance) {
+            ioInstance.emit('complaint_updated', c.toObject());
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Complaint SLA Daemon Notice]', err.message);
+  }
 };
 
 /**
