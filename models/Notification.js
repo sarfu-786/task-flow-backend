@@ -15,7 +15,7 @@ const notificationSchema = new mongoose.Schema({
   },
   userName: {
     type: String,
-    required: true,
+    default: 'System',
   },
   userAvatar: {
     type: String,
@@ -75,7 +75,7 @@ const notificationSchema = new mongoose.Schema({
   },
   forRole: {
     type: String,
-    enum: ['Manager', 'User', 'All'],
+    enum: ['Super Admin', 'Manager', 'User', 'All'],
     default: 'Manager',
   },
   createdAt: {

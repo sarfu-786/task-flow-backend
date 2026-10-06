@@ -15,7 +15,7 @@ const DUMMY_EMAILS = [
 
 (async () => {
   try {
-    await mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://sarfrajahamad068_db_user:NTAPWfhRqpTYZumh@cluster0.p31lill.mongodb.net/taskflow_db?retryWrites=true&w=majority&appName=Cluster0');
+    await mongoose.connect(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/taskflow_db');
     
     // 1. Remove dummy users matching emails or dummy names
     const delUsersRes = await User.deleteMany({

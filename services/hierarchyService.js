@@ -168,10 +168,10 @@ const isLeadAccessible = (scope, lead) => {
   }
 
   const lAssignedId = lead.assignedToId
-    ? lead.assignedToId.toString().trim()
+    ? (lead.assignedToId._id ? lead.assignedToId._id.toString() : lead.assignedToId.toString()).trim()
     : (lead.user ? (lead.user._id ? lead.user._id.toString() : lead.user.toString()).trim() : '');
   const lAssignedName = (lead.assignedTo || lead.assignedSalesUser || '').toLowerCase().trim();
-  const lAssignedById = lead.assignedById ? lead.assignedById.toString().trim() : '';
+  const lAssignedById = lead.assignedById ? (lead.assignedById._id ? lead.assignedById._id.toString() : lead.assignedById.toString()).trim() : '';
   const lAssignedByName = (lead.assignedBy || '').toLowerCase().trim();
   const lCreatedById = lead.createdBy ? (lead.createdBy._id ? lead.createdBy._id.toString() : lead.createdBy.toString()).trim() : '';
 
@@ -191,7 +191,7 @@ const isTaskAccessible = (scope, task) => {
 
   const tUserId = task.user ? (task.user._id ? task.user._id.toString() : task.user.toString()).trim() : '';
   const tAssignedName = (task.assignedTo || '').toLowerCase().trim();
-  const tAssignedById = task.assignedById ? task.assignedById.toString().trim() : '';
+  const tAssignedById = task.assignedById ? (task.assignedById._id ? task.assignedById._id.toString() : task.assignedById.toString()).trim() : '';
   const tAssignedByName = (task.assignedBy || '').toLowerCase().trim();
 
   if (tUserId && scope.allowedUserIds.has(tUserId)) return true;
@@ -208,11 +208,13 @@ const isOpportunityAccessible = (scope, opp) => {
   if (scope.isSuperAdmin) return true;
 
   const oUserId = opp.user ? (opp.user._id ? opp.user._id.toString() : opp.user.toString()).trim() : '';
+  const oAssignedId = opp.assignedToId ? (opp.assignedToId._id ? opp.assignedToId._id.toString() : opp.assignedToId.toString()).trim() : '';
   const oAssignedName = (opp.assignedTo || '').toLowerCase().trim();
-  const oAssignedById = opp.assignedById ? opp.assignedById.toString().trim() : '';
+  const oAssignedById = opp.assignedById ? (opp.assignedById._id ? opp.assignedById._id.toString() : opp.assignedById.toString()).trim() : '';
   const oAssignedByName = (opp.assignedBy || '').toLowerCase().trim();
 
   if (oUserId && scope.allowedUserIds.has(oUserId)) return true;
+  if (oAssignedId && scope.allowedUserIds.has(oAssignedId)) return true;
   if (oAssignedById && scope.allowedUserIds.has(oAssignedById)) return true;
 
   if (oAssignedName && scope.allowedNames.has(oAssignedName)) return true;

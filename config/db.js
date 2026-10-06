@@ -241,17 +241,11 @@ const fallbackStore = {
 fallbackStore.loadFromFile();
 
 const connectDB = async () => {
-  let mongoURI = process.env.MONGODB_URI;
-
-  if (!mongoURI || mongoURI.includes('127.0.0.1') || mongoURI.includes('localhost') || !mongoURI.includes('mongodb+srv')) {
-    mongoURI = 'mongodb+srv://sarfrajahamad068_db_user:NTAPWfhRqpTYZumh@cluster0.p31lill.mongodb.net/taskflow_db?retryWrites=true&w=majority&appName=Cluster0';
-  } else if (mongoURI.includes('mongodb+srv://') && !mongoURI.includes('.mongodb.net/')) {
-    mongoURI = mongoURI.replace('.mongodb.net/?', '.mongodb.net/taskflow_db?');
-  }
+  const mongoURI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/taskflow_db';
 
   try {
     mongoose.set('strictQuery', false);
-    console.log(`[Database] Attempting connection to MongoDB Atlas...`);
+    console.log(`[Database] Connecting to MongoDB at: ${mongoURI}`);
 
     mongoose.connection.on('connected', () => {
       console.log(`[MongoDB Event] Connected to database: ${mongoose.connection.name}`);
@@ -266,23 +260,23 @@ const connectDB = async () => {
     });
 
     mongoose.connection.on('disconnected', () => {
-      console.warn(`[MongoDB Event] Disconnected from Atlas.`);
+      console.warn(`[MongoDB Event] Disconnected from database.`);
       fallbackStore._isFallback = true;
     });
 
     await mongoose.connect(mongoURI, {
-      serverSelectionTimeoutMS: 2500,
-      socketTimeoutMS: 10000,
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 30000,
       family: 4,
       maxPoolSize: 10,
     });
 
-    console.log(`[Database] MongoDB Connected Successfully to Atlas DB: ${mongoose.connection.name}`);
+    console.log(`[Database] MongoDB Connected Successfully to DB: ${mongoose.connection.name}`);
     fallbackStore._isFallback = false;
     fallbackStore.dbError = null;
     return { isFallback: false };
   } catch (error) {
-    console.warn(`[Database Notice] MongoDB Atlas connection unavailable:`, error.message);
+    console.warn(`[Database Notice] MongoDB connection error:`, error.message);
     console.log(`[Database] Operating on persistent file-backed local database store.`);
     fallbackStore._isFallback = true;
     fallbackStore.dbError = error.message;
@@ -292,3 +286,4 @@ const connectDB = async () => {
 };
 
 module.exports = { connectDB, fallbackStore };
+
