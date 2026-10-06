@@ -430,6 +430,9 @@ router.get('/', protect, async (req, res) => {
 router.get('/chain/:userId', protect, async (req, res) => {
   try {
     const { userId } = req.params;
+    const isSuperAdmin = req.user && req.user.role === 'Super Admin';
+    const currentUserIdStr = req.user?._id ? req.user._id.toString() : (req.user?.id ? req.user.id.toString() : '');
+
     let allUsers = [];
 
     if (fallbackStore.isFallback) {
@@ -438,6 +441,18 @@ router.get('/chain/:userId', protect, async (req, res) => {
       allUsers = await User.find({ status: { $nin: ['Rejected', 'Pending'] } })
         .select('-password')
         .lean();
+    }
+
+    // Hierarchy authorization check
+    if (!isSuperAdmin && userId !== currentUserIdStr) {
+      const { getUserScopeContext } = require('../services/hierarchyService');
+      const scope = getUserScopeContext(req.user, allUsers);
+      if (!scope.allowedUserIds.has(userId.toString())) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: You do not have permission to view reporting chain for this user',
+        });
+      }
     }
 
     const targetUser = allUsers.find((u) => u._id && u._id.toString() === userId.toString());
@@ -482,6 +497,9 @@ router.get('/chain/:userId', protect, async (req, res) => {
 router.get('/subordinates/:userId', protect, async (req, res) => {
   try {
     const { userId } = req.params;
+    const isSuperAdmin = req.user && req.user.role === 'Super Admin';
+    const currentUserIdStr = req.user?._id ? req.user._id.toString() : (req.user?.id ? req.user.id.toString() : '');
+
     let allUsers = [];
     let allTasks = [];
 
@@ -493,6 +511,18 @@ router.get('/subordinates/:userId', protect, async (req, res) => {
         .select('-password')
         .lean();
       allTasks = await Task.find({}).lean();
+    }
+
+    // Hierarchy authorization check
+    if (!isSuperAdmin && userId !== currentUserIdStr) {
+      const { getUserScopeContext } = require('../services/hierarchyService');
+      const scope = getUserScopeContext(req.user, allUsers);
+      if (!scope.allowedUserIds.has(userId.toString())) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: You do not have permission to view subordinates for this user',
+        });
+      }
     }
 
     const tree = buildHierarchyTree(allUsers, allTasks, userId);

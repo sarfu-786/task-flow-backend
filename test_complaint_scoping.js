@@ -23,8 +23,27 @@ async function testComplaintScoping() {
   const server = app.listen(5098, async () => {
     try {
       const superAdminUser = fallbackStore.users.find((u) => u.role === 'Super Admin') || fallbackStore.users[0];
-      const regularUser1 = fallbackStore.users.find((u) => u.role === 'User') || fallbackStore.users[1];
-      const regularUser2 = fallbackStore.users.find((u) => u._id !== regularUser1._id && u.role !== 'Super Admin') || fallbackStore.users[2];
+      const regularUser1 = {
+        _id: '64e8a1' + '1111111111111111'.substring(0, 16),
+        name: 'Peer User Alpha',
+        email: 'peer.alpha@taskflow.com',
+        username: 'peeralpha',
+        role: 'User',
+        roles: ['User'],
+        reportsTo: null,
+      };
+      const regularUser2 = {
+        _id: '64e8a1' + '2222222222222222'.substring(0, 16),
+        name: 'Peer User Beta',
+        email: 'peer.beta@taskflow.com',
+        username: 'peerbeta',
+        role: 'User',
+        roles: ['User'],
+        reportsTo: null,
+      };
+
+      if (!fallbackStore.users.some(u => u._id === regularUser1._id)) fallbackStore.users.push(regularUser1);
+      if (!fallbackStore.users.some(u => u._id === regularUser2._id)) fallbackStore.users.push(regularUser2);
 
       console.log(`Super Admin: ${superAdminUser.name} (${superAdminUser._id})`);
       console.log(`User 1: ${regularUser1.name} (${regularUser1._id})`);

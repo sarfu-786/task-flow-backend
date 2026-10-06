@@ -406,4 +406,13 @@ complaintSchema.pre('save', function (next) {
   next();
 });
 
+complaintSchema.index({ status: 1 });
+complaintSchema.index({ priority: 1 });
+complaintSchema.index({ assignedTo: 1 });
+complaintSchema.index({ user: 1 });
+complaintSchema.index({ customerEmail: 1 });
+complaintSchema.index({ customerPhone: 1 });
+complaintSchema.index({ slaDeadline: 1 });
+complaintSchema.index({ createdAt: -1 });
+
 module.exports = mongoose.model('Complaint', complaintSchema);

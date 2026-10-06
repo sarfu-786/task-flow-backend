@@ -80,4 +80,9 @@ const auditLogSchema = new mongoose.Schema({
   },
 });
 
+// Production Compound Indexes
+auditLogSchema.index({ entity_type: 1, entity_id: 1, timestamp: -1 });
+auditLogSchema.index({ operator_id: 1, timestamp: -1 });
+auditLogSchema.index({ action: 1, timestamp: -1 });
+
 module.exports = mongoose.model('AuditLog', auditLogSchema);

@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const { protect, JWT_SECRET } = require('../middleware/auth');
+const { loginRateLimiter } = require('../middleware/security');
 const { fallbackStore } = require('../config/db');
 
 const Notification = require('../models/Notification');
@@ -484,7 +485,7 @@ const checkPasswordMatch = async (inputPass, storedPass, userObj) => {
 // @route   POST /api/auth/login
 // @desc    Authenticate user & get token
 // @access  Public
-router.post('/login', async (req, res) => {
+router.post('/login', loginRateLimiter, async (req, res) => {
   try {
     const inputIdentifier = req.body.usernameOrEmail || req.body.email || req.body.username;
     const { password } = req.body;
@@ -532,6 +533,9 @@ router.post('/login', async (req, res) => {
         approvalStatus: 'Rejected',
       });
     }
+
+    // Reset rate limiter on successful authentication
+    if (req.resetLoginRateLimit) req.resetLoginRateLimit();
 
     const token = generateToken(user);
 

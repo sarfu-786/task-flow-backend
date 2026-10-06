@@ -226,20 +226,42 @@ const isProjectAccessible = (scope, project) => {
   if (scope.isSuperAdmin) return true;
 
   const pManagerId = project.manager ? (project.manager._id ? project.manager._id.toString() : project.manager.toString()).trim() : '';
-  const pManagerName = (project.managerName || '').toLowerCase().trim();
+  const pManagerName = (project.managerName || project.projectManager || '').toLowerCase().trim();
+  const pOwnerId = project.owner ? (project.owner._id ? project.owner._id.toString() : project.owner.toString()).trim() : '';
+  const pOwnerName = (project.ownerName || project.projectOwner || '').toLowerCase().trim();
   const pCreatedById = project.createdBy ? (project.createdBy._id ? project.createdBy._id.toString() : project.createdBy.toString()).trim() : '';
+  const pUserId = project.user ? (project.user._id ? project.user._id.toString() : project.user.toString()).trim() : '';
 
   if (pManagerId && scope.allowedUserIds.has(pManagerId)) return true;
+  if (pOwnerId && scope.allowedUserIds.has(pOwnerId)) return true;
   if (pCreatedById && scope.allowedUserIds.has(pCreatedById)) return true;
-  if (pManagerName && scope.allowedNames.has(pManagerName)) return true;
+  if (pUserId && scope.allowedUserIds.has(pUserId)) return true;
+
+  if (pManagerName && pManagerName !== 'unassigned' && scope.allowedNames.has(pManagerName)) return true;
+  if (pOwnerName && pOwnerName !== 'unassigned' && scope.allowedNames.has(pOwnerName)) return true;
 
   const isTeamMatch = (project.teamMembers || []).some((m) => {
     const mUserId = m.userId ? (m.userId._id ? m.userId._id.toString() : m.userId.toString()) : (m.user ? (m.user._id ? m.user._id.toString() : m.user.toString()) : '');
     const mName = (m.name || m.userName || '').toLowerCase().trim();
     return (mUserId && scope.allowedUserIds.has(mUserId)) || (mName && scope.allowedNames.has(mName));
   });
+  if (isTeamMatch) return true;
 
-  return isTeamMatch;
+  const isTaskMatch = (project.tasks || []).some((t) => {
+    const tUserId = t.assignedToId ? (t.assignedToId._id ? t.assignedToId._id.toString() : t.assignedToId.toString()) : '';
+    const tName = (t.assignedTo || '').toLowerCase().trim();
+    return (tUserId && scope.allowedUserIds.has(tUserId)) || (tName && tName !== 'unassigned' && scope.allowedNames.has(tName));
+  });
+  if (isTaskMatch) return true;
+
+  const isMilestoneMatch = (project.milestones || []).some((ms) => {
+    const msOwnerId = ms.owner ? (ms.owner._id ? ms.owner._id.toString() : ms.owner.toString()) : '';
+    const msOwnerName = (ms.ownerName || '').toLowerCase().trim();
+    return (msOwnerId && scope.allowedUserIds.has(msOwnerId)) || (msOwnerName && msOwnerName !== 'unassigned' && scope.allowedNames.has(msOwnerName));
+  });
+  if (isMilestoneMatch) return true;
+
+  return false;
 };
 
 const isUserAccessible = (scope, targetUser) => {

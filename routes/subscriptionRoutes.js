@@ -94,6 +94,10 @@ router.get('/', protect, async (req, res) => {
 // @access  Private (Super Admin or Manager)
 router.put('/modules', protect, async (req, res) => {
   try {
+    if (!req.user || !['Super Admin', 'Manager', 'Administrator'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Forbidden: Only Super Admin or Manager can modify organization modules' });
+    }
+
     const { activeModules } = req.body;
     if (!Array.isArray(activeModules)) {
       return res.status(400).json({ success: false, message: 'activeModules must be an array of module IDs' });
@@ -151,6 +155,10 @@ router.put('/modules', protect, async (req, res) => {
 // @access  Private (Super Admin or Manager)
 router.put('/seats', protect, async (req, res) => {
   try {
+    if (!req.user || !['Super Admin', 'Manager', 'Administrator'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Forbidden: Only Super Admin or Manager can modify organization seat allocation' });
+    }
+
     const { userSeats } = req.body;
     const seats = parseInt(userSeats, 10);
     if (isNaN(seats) || seats < 1) {
@@ -193,9 +201,13 @@ router.put('/seats', protect, async (req, res) => {
 
 // @route   PUT /api/subscriptions/currency
 // @desc    Toggle USD / INR currency
-// @access  Private
+// @access  Private (Super Admin or Manager)
 router.put('/currency', protect, async (req, res) => {
   try {
+    if (!req.user || !['Super Admin', 'Manager', 'Administrator'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Forbidden: Only Super Admin or Manager can modify billing currency' });
+    }
+
     const { currency } = req.body;
     if (!['USD', 'INR'].includes(currency)) {
       return res.status(400).json({ success: false, message: 'Currency must be USD or INR' });

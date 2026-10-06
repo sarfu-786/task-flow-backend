@@ -96,10 +96,17 @@ const taskSchema = new mongoose.Schema({
   }
 });
 
-// Update the updatedAt timestamp before saving
 taskSchema.pre('save', function (next) {
   this.updatedAt = Date.now();
   next();
 });
+
+taskSchema.index({ user: 1 });
+taskSchema.index({ assignedTo: 1 });
+taskSchema.index({ assignedById: 1 });
+taskSchema.index({ status: 1 });
+taskSchema.index({ priority: 1 });
+taskSchema.index({ expectedDate: 1 });
+taskSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model('Task', taskSchema);

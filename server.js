@@ -3,6 +3,7 @@ const http = require('http');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const { Server } = require('socket.io');
+const jwt = require('jsonwebtoken');
 const { connectDB, fallbackStore } = require('./config/db');
 const User = require('./models/User');
 const Task = require('./models/Task');
@@ -13,6 +14,8 @@ const Complaint = require('./models/Complaint');
 const Project = require('./models/Project');
 const { Subscription } = require('./models/Subscription');
 const { seedDatabase } = require('./seedData');
+const { JWT_SECRET } = require('./middleware/auth');
+const { securityHeaders, errorHandler } = require('./middleware/security');
 
 // Load environment variables
 dotenv.config();
@@ -33,40 +36,90 @@ const io = new Server(httpServer, {
   pingInterval: 10000,
 });
 
+// Socket.IO Server-Side JWT Authentication & Scoped Authorization Middleware
+io.use((socket, next) => {
+  try {
+    const rawAuth =
+      socket.handshake.auth?.token ||
+      socket.handshake.headers?.authorization ||
+      socket.handshake.query?.token;
+
+    const token = rawAuth ? rawAuth.replace(/^Bearer\s+/i, '').trim() : null;
+
+    if (!token || token === 'null' || token === 'undefined') {
+      return next(new Error('Authentication error: Token missing'));
+    }
+
+    const decoded = jwt.verify(token, JWT_SECRET);
+    socket.user = decoded;
+    socket.isAuthenticated = true;
+    next();
+  } catch (err) {
+    next(new Error('Authentication error: Invalid or expired token'));
+  }
+});
+
 // Attach io to express app so routes can access it via req.app.get('io')
 app.set('io', io);
 
-// Socket.io Connection & Room Management
+// Socket.io Connection & Verified Room Management
 io.on('connection', (socket) => {
+  // Always join public broadcast channel
+  socket.join('all');
+
+  // If connection is verified, automatically join authorized personal & role rooms
+  if (socket.isAuthenticated && socket.user) {
+    const user = socket.user;
+    const userIdStr = user.id ? user.id.toString() : '';
+    const userNameStr = (user.name || '').toLowerCase().trim();
+    const userUsernameStr = (user.username || '').toLowerCase().trim();
+
+    if (userIdStr) socket.join(`user:${userIdStr}`);
+    if (userUsernameStr) socket.join(`user:${userUsernameStr}`);
+    if (userNameStr) socket.join(`user:${userNameStr}`);
+
+    const userRoles = Array.isArray(user.roles) && user.roles.length > 0 ? user.roles : [user.role || 'User'];
+    userRoles.forEach((r) => socket.join(`role:${r}`));
+
+    if (userRoles.some((r) => ['Manager', 'Executive', 'Administrator', 'Super Admin'].includes(r))) {
+      socket.join('role:Manager');
+    }
+  }
+
+  // Handle client-requested room joins safely with server-side validation
   socket.on('join', (data) => {
     try {
       if (!data) return;
-      const { userId, username, role, roles, name } = typeof data === 'string' ? JSON.parse(data) : data;
+      const parsed = typeof data === 'string' ? JSON.parse(data) : data;
 
-      if (userId) {
-        socket.join(`user:${userId.toString()}`);
+      if (socket.isAuthenticated && socket.user) {
+        const user = socket.user;
+        const authId = user.id ? user.id.toString() : '';
+        const authUsername = (user.username || '').toLowerCase().trim();
+        const authName = (user.name || '').toLowerCase().trim();
+        const isSuperAdmin = user.role === 'Super Admin' || (user.roles || []).includes('Super Admin');
+
+        // Only permit joining rooms belonging to self unless Super Admin
+        if (parsed.userId && (parsed.userId.toString() === authId || isSuperAdmin)) {
+          socket.join(`user:${parsed.userId.toString()}`);
+        }
+        if (parsed.username && (parsed.username.toLowerCase().trim() === authUsername || isSuperAdmin)) {
+          socket.join(`user:${parsed.username.toLowerCase().trim()}`);
+        }
+        if (parsed.name && (parsed.name.toLowerCase().trim() === authName || isSuperAdmin)) {
+          socket.join(`user:${parsed.name.toLowerCase().trim()}`);
+        }
       }
-      if (username) {
-        socket.join(`user:${username.toString().toLowerCase().trim()}`);
-      }
-      if (name) {
-        socket.join(`user:${name.toString().toLowerCase().trim()}`);
-      }
-      const userRoles = Array.isArray(roles) && roles.length > 0 ? roles : [role || 'User'];
-      userRoles.forEach((r) => {
-        socket.join(`role:${r}`);
-      });
-      if (userRoles.some((r) => ['Manager', 'Executive', 'Administrator', 'Super Admin'].includes(r))) {
-        socket.join('role:Manager');
-      }
-      socket.join('all');
     } catch (err) {
-      // quiet join
+      // Quiet fail
     }
   });
 });
 
-// Middleware
+// Security HTTP Headers
+app.use(securityHeaders);
+
+// CORS configuration
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -100,20 +153,21 @@ app.use('/api/audit', require('./routes/auditRoutes'));
 app.use('/api/followups', require('./routes/followUpRoutes'));
 
 const { initSLADaemon } = require('./services/slaDaemon');
-
 const mongoose = require('mongoose');
 
-// Health check endpoint
+// Safe Health check endpoint
 app.get('/api/health', (req, res) => {
+  const isDbReady = mongoose.connection ? mongoose.connection.readyState === 1 : false;
   res.json({
     status: 'OK',
-    timestamp: new Date(),
-    database: fallbackStore.isFallback ? 'In-Memory / Persistent Store' : 'MongoDB Atlas Live Connected',
-    dbName: mongoose.connection ? mongoose.connection.name : 'none',
-    readyState: mongoose.connection ? mongoose.connection.readyState : 0,
-    dbError: fallbackStore.dbError || null,
-    activeModules: fallbackStore.subscription?.activeModules || ['leads', 'complaints', 'projects'],
-    socketConnections: io.engine.clientsCount,
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+    version: '2.0.0',
+    mode: fallbackStore.isFallback ? 'Persistent Fallback Store' : 'MongoDB Production',
+    database: fallbackStore.isFallback ? 'ready (fallback)' : (isDbReady ? 'connected' : 'connecting'),
+    isDatabaseHealthy: fallbackStore.isFallback ? true : isDbReady,
+    activeModules: fallbackStore.subscription?.activeModules || ['leads', 'complaints', 'projects', 'tasks'],
+    socketConnections: io.engine ? io.engine.clientsCount : 0,
   });
 });
 
@@ -122,21 +176,15 @@ app.get('/', (req, res) => {
   res.json({
     name: 'TaskFlow Pro Enterprise Modular API',
     version: '2.0.0',
-    modules: ['Lead Management', 'Complaint Management', 'Project Management'],
+    modules: ['Lead Management', 'Complaint Management', 'Project Management', 'Task Management'],
     pricing: 'Module-based annual per-user subscription',
-    roles: ['Super Admin', 'Manager', 'Sales Coordinator', 'Service Coordinator'],
+    roles: ['Super Admin', 'Manager', 'Sales Coordinator', 'Service Coordinator', 'User'],
     status: 'Active with WebSockets and Real-time Live Events',
   });
 });
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('[Server Error]', err.stack);
-  res.status(500).json({
-    success: false,
-    message: err.message || 'Internal Server Error',
-  });
-});
+// Global Centralized Error handling middleware
+app.use(errorHandler);
 
 // Start Server and Initialize DB
 const startServer = async () => {
@@ -171,7 +219,7 @@ const startServer = async () => {
       console.log(`=========================================`);
       console.log(`🚀 TaskFlow Pro Enterprise Server Running on port ${PORT}`);
       console.log(`🌐 API Endpoint: http://localhost:${PORT}/api`);
-      console.log(`📦 Active Modules: ${(fallbackStore.subscription?.activeModules || ['leads', 'complaints', 'projects']).join(', ')}`);
+      console.log(`📦 Active Modules: ${(fallbackStore.subscription?.activeModules || ['leads', 'complaints', 'projects', 'tasks']).join(', ')}`);
       console.log(`⚡ Real-Time WebSockets / Socket.io Active`);
       console.log(`📊 Mode: ${dbStatus.isFallback ? 'Fallback In-Memory Store' : 'MongoDB Database'}`);
       console.log(`=========================================`);
@@ -183,4 +231,4 @@ const startServer = async () => {
 
 startServer();
 
-module.exports = { app, httpServer };
+module.exports = { app, httpServer, io };

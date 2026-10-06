@@ -84,5 +84,15 @@ const notificationSchema = new mongoose.Schema({
   },
 });
 
+// Production Indexes for notification lookup & badge counts
+notificationSchema.index({ recipientUser: 1, isRead: 1, createdAt: -1 });
+notificationSchema.index({ recipientName: 1, isRead: 1 });
+notificationSchema.index({ user: 1, createdAt: -1 });
+notificationSchema.index({ forRole: 1, isRead: 1, createdAt: -1 });
+notificationSchema.index({ taskId: 1 });
+notificationSchema.index({ leadId: 1 });
+notificationSchema.index({ complaintId: 1 });
+notificationSchema.index({ projectId: 1 });
+
 module.exports = mongoose.model('Notification', notificationSchema);
 
