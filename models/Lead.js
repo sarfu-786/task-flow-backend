@@ -74,7 +74,7 @@ const leadSchema = new mongoose.Schema({
   },
   cost_per_lead: {
     type: Number,
-    default: 25.0,
+    default: 0,
     min: 0,
   },
   engagement_score: {
@@ -82,6 +82,19 @@ const leadSchema = new mongoose.Schema({
     min: 0,
     max: 100,
     default: 50,
+  },
+  leadScore: {
+    type: Number,
+    min: 0,
+    max: 100,
+    default: 50,
+    index: true,
+  },
+  leadTemperature: {
+    type: String,
+    enum: ['Hot', 'Warm', 'Cold'],
+    default: 'Warm',
+    index: true,
   },
 
   // Core Status: New -> Contacted -> Follow-Up -> Qualified -> Interested -> Converted | Not Interested | Invalid
@@ -451,6 +464,18 @@ leadSchema.pre('save', function (next) {
   if (this.stage_entered_at) {
     const diffMs = Date.now() - new Date(this.stage_entered_at).getTime();
     this.days_in_stage = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)));
+  }
+
+  // Calculate Lead Score & Lead Temperature
+  try {
+    const { calculateLeadScore } = require('../services/leadScoringService');
+    const scoring = calculateLeadScore(this);
+    this.leadScore = scoring.score;
+    this.leadTemperature = scoring.temperature;
+  } catch (scoreErr) {
+    // Graceful fallback
+    if (this.leadScore === undefined) this.leadScore = 50;
+    if (!this.leadTemperature) this.leadTemperature = 'Warm';
   }
 
   next();

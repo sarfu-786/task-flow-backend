@@ -203,7 +203,7 @@ const opportunitySchema = new mongoose.Schema({
   },
   cost_per_lead: {
     type: Number,
-    default: 25.0,
+    default: 0,
   },
   stage_entered_at: {
     type: Date,

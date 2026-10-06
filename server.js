@@ -96,6 +96,7 @@ app.use('/api/subscriptions', require('./routes/subscriptionRoutes'));
 app.use('/api/subscription', require('./routes/subscriptionRoutes'));
 app.use('/api/mis', require('./routes/misRoutes'));
 app.use('/api/audit-logs', require('./routes/auditRoutes'));
+app.use('/api/audit', require('./routes/auditRoutes'));
 app.use('/api/followups', require('./routes/followUpRoutes'));
 
 const { initSLADaemon } = require('./services/slaDaemon');

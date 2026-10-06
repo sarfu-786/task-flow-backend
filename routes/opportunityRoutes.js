@@ -888,6 +888,17 @@ router.patch('/:id/stage', protect, async (req, res) => {
         });
       }
 
+      if (existing.stage !== stage) {
+        existing.stage_entered_at = new Date();
+        if (!existing.activity_history) existing.activity_history = [];
+        existing.activity_history.push({
+          type: 'STAGE_UPDATE',
+          note: `Stage transitioned to ${stage}`,
+          agent: req.user?.name || 'User',
+          timestamp: new Date(),
+        });
+      }
+
       existing.stage = stage;
       existing.opportunity_stage = stage.toUpperCase().replace(/[\s\/]+/g, '_');
       if (finalProbability !== undefined) {
@@ -946,6 +957,17 @@ router.patch('/:id/stage', protect, async (req, res) => {
         return res.status(403).json({
           success: false,
           message: 'Forbidden: You do not have permission to advance or modify this deal',
+        });
+      }
+
+      if (opportunity.stage !== stage) {
+        opportunity.stage_entered_at = new Date();
+        if (!opportunity.activity_history) opportunity.activity_history = [];
+        opportunity.activity_history.push({
+          type: 'STAGE_UPDATE',
+          note: `Stage transitioned to ${stage}`,
+          agent: req.user?.name || 'User',
+          timestamp: new Date(),
         });
       }
 

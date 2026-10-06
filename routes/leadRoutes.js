@@ -10,6 +10,16 @@ const Notification = require('../models/Notification');
 const { protect } = require('../middleware/auth');
 const { fallbackStore } = require('../config/db');
 const { logAuditAction } = require('../services/auditService');
+const {
+  calculateLeadScore,
+  getFollowUpStatus,
+  getLeadFollowUpSummary,
+  findDuplicateLead,
+  enrichLeadWithScoringAndFollowUp,
+  normalizeEmail,
+  normalizePhone,
+  normalizeText,
+} = require('../services/leadScoringService');
 
 // Helper to check if Lead Management module is active
 const isLeadModuleActive = () => {
@@ -462,6 +472,74 @@ const createFollowUpNotification = async ({
   }
 };
 
+// @route   POST /api/leads/check-duplicate
+// @desc    Detect potential duplicate leads based on email, phone, or company+contact with hierarchy permission filtering
+// @access  Private
+router.post('/check-duplicate', protect, async (req, res) => {
+  try {
+    const { email, phone, mobileNumber, company, name, contactPerson, excludeLeadId } = req.body;
+
+    let existingLeads = [];
+    let allUsers = [];
+    if (fallbackStore.isFallback) {
+      existingLeads = fallbackStore.leads || [];
+      allUsers = fallbackStore.users || [];
+    } else {
+      existingLeads = await Lead.find({ is_deleted: { $ne: true } }).lean();
+      allUsers = await User.find({}).lean();
+    }
+
+    const dupResult = findDuplicateLead(
+      { email, phone: phone || mobileNumber, company, name: name || contactPerson, contactPerson: contactPerson || name },
+      existingLeads,
+      excludeLeadId
+    );
+
+    if (!dupResult.isDuplicate || !dupResult.matchingLead) {
+      return res.json({
+        success: true,
+        isDuplicate: false,
+        matches: [],
+      });
+    }
+
+    const matchingLead = dupResult.matchingLead;
+    const isAccessible = canUserAccessLead(req.user, matchingLead, allUsers);
+
+    // If accessible to user, return full lead info; otherwise return sanitized info preserving hierarchy security
+    const safeMatch = {
+      _id: matchingLead._id,
+      leadId: matchingLead.leadId || 'LD-XXX',
+      lead_id: matchingLead.lead_id,
+      name: isAccessible ? (matchingLead.name || matchingLead.contactPerson) : 'Confidential Lead',
+      contactPerson: isAccessible ? (matchingLead.contactPerson || matchingLead.name) : 'Confidential Lead',
+      company: matchingLead.company || 'Enterprise Account',
+      email: isAccessible ? matchingLead.email : '***@***.***',
+      phone: isAccessible ? (matchingLead.phone || matchingLead.mobileNumber) : '***-***-****',
+      assignedTo: isAccessible ? (matchingLead.assignedTo || matchingLead.assignedSalesUser) : 'Another Representative',
+      status: matchingLead.status || 'New',
+      leadScore: matchingLead.leadScore !== undefined ? matchingLead.leadScore : calculateLeadScore(matchingLead).score,
+      leadTemperature: matchingLead.leadTemperature || calculateLeadScore(matchingLead).temperature,
+      isAccessible,
+      matchType: dupResult.matchType,
+      matchValue: dupResult.matchValue,
+      reason: dupResult.reason,
+    };
+
+    return res.json({
+      success: true,
+      isDuplicate: true,
+      matchType: dupResult.matchType,
+      reason: dupResult.reason,
+      match: safeMatch,
+      matches: [safeMatch],
+    });
+  } catch (error) {
+    console.error('Check duplicate lead error:', error);
+    res.status(500).json({ success: false, message: 'Failed to check duplicate lead', error: error.message });
+  }
+});
+
 // =========================================================================
 // LEAD EXCEL IMPORT & EXPORT SUITE (.XLSX ONLY)
 // =========================================================================
@@ -654,13 +732,14 @@ router.post('/excel/preview', protect, async (req, res) => {
     }
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    const phoneRegex = /^[\+]?[(]?[0-9]{3}[)]?[-\s\.]?[0-9]{3}[-\s\.]?[0-9]{4,6}$/;
     let validCount = 0;
     let invalidCount = 0;
     let duplicateCount = 0;
     let missingRequiredCount = 0;
 
     const validatedRows = [];
+    const seenEmailsInBatch = new Map();
+    const seenPhonesInBatch = new Map();
 
     for (let idx = 0; idx < rawRows.length; idx++) {
       const rawRow = rawRows[idx];
@@ -714,28 +793,59 @@ router.post('/excel/preview', protect, async (req, res) => {
         priority = 'Medium';
       }
 
-      // Duplicate Check
+      // Comprehensive Duplicate Check (Database & In-Batch)
       let existingMatch = null;
+      let duplicateReason = '';
+      let matchType = '';
+
       if (leadId) {
         existingMatch = existingLeads.find((l) => (l.leadId && l.leadId.toLowerCase() === leadId.toLowerCase()) || (l.lead_id && l.lead_id.toLowerCase() === leadId.toLowerCase()));
-      }
-      if (!existingMatch && email) {
-        existingMatch = existingLeads.find((l) => l.email && l.email.toLowerCase() === email);
-      }
-      if (!existingMatch && phone) {
-        const cleanPhone = phone.replace(/\D/g, '');
-        if (cleanPhone.length >= 7) {
-          existingMatch = existingLeads.find((l) => {
-            const p = (l.phone || l.mobileNumber || '').replace(/\D/g, '');
-            return p && p === cleanPhone;
-          });
+        if (existingMatch) {
+          duplicateReason = `Matches existing Lead ID '${existingMatch.leadId}'`;
+          matchType = 'LEAD_ID';
         }
       }
 
-      const isDuplicate = !!existingMatch;
+      if (!existingMatch) {
+        const dupCheck = findDuplicateLead(
+          { email, phone, company, name, contactPerson: name },
+          existingLeads
+        );
+        if (dupCheck.isDuplicate && dupCheck.matchingLead) {
+          existingMatch = dupCheck.matchingLead;
+          duplicateReason = dupCheck.reason;
+          matchType = dupCheck.matchType;
+        }
+      }
+
+      // Check for in-file batch duplicates
+      const normE = normalizeEmail(email);
+      const normP = normalizePhone(phone);
+      let isBatchDuplicate = false;
+
+      if (normE) {
+        if (seenEmailsInBatch.has(normE)) {
+          isBatchDuplicate = true;
+          warnings.push(`Duplicate row in this file: Email matches row ${seenEmailsInBatch.get(normE)}.`);
+        } else {
+          seenEmailsInBatch.set(normE, rowIndex);
+        }
+      }
+      if (normP && normP.length >= 7) {
+        if (seenPhonesInBatch.has(normP)) {
+          isBatchDuplicate = true;
+          warnings.push(`Duplicate row in this file: Phone matches row ${seenPhonesInBatch.get(normP)}.`);
+        } else {
+          seenPhonesInBatch.set(normP, rowIndex);
+        }
+      }
+
+      const isDuplicate = !!existingMatch || isBatchDuplicate;
       if (isDuplicate) {
         duplicateCount++;
-        warnings.push(`Existing record detected (${existingMatch.leadId || existingMatch.name}). Will be updated if Update/Upsert mode is selected.`);
+        if (existingMatch) {
+          warnings.push(`Existing record detected (${existingMatch.leadId || existingMatch.name}): ${duplicateReason}. Will be updated if Update/Upsert mode is selected.`);
+        }
       }
 
       // Hierarchy assignment check
@@ -792,6 +902,8 @@ router.post('/excel/preview', protect, async (req, res) => {
         errors,
         warnings,
         isDuplicate,
+        duplicateReason,
+        matchType,
         existingId: existingMatch ? existingMatch._id : null,
       });
     }
@@ -889,9 +1001,13 @@ router.post('/excel/import', protect, async (req, res) => {
                 updatedAt: new Date().toISOString(),
               };
 
+              const scoring = calculateLeadScore(updatedLead);
+              updatedLead.leadScore = scoring.score;
+              updatedLead.leadTemperature = scoring.temperature;
+
               fallbackStore.leads[existingIndex] = updatedLead;
               updatedCount++;
-              importedLeads.push(updatedLead);
+              importedLeads.push(enrichLeadWithScoringAndFollowUp(updatedLead));
             } else {
               // Duplicate skipped
               skippedCount++;
@@ -941,9 +1057,13 @@ router.post('/excel/import', protect, async (req, res) => {
               ],
             };
 
+            const scoring = calculateLeadScore(newLead);
+            newLead.leadScore = scoring.score;
+            newLead.leadTemperature = scoring.temperature;
+
             fallbackStore.leads.unshift(newLead);
             createdCount++;
-            importedLeads.push(newLead);
+            importedLeads.push(enrichLeadWithScoringAndFollowUp(newLead));
           }
         } else {
           // MongoDB Live Store
@@ -987,9 +1107,13 @@ router.post('/excel/import', protect, async (req, res) => {
               if (row.country) existing.country = row.country;
               existing.updatedAt = new Date();
 
+              const scoring = calculateLeadScore(existing);
+              existing.leadScore = scoring.score;
+              existing.leadTemperature = scoring.temperature;
+
               await existing.save();
               updatedCount++;
-              importedLeads.push(existing.toObject());
+              importedLeads.push(enrichLeadWithScoringAndFollowUp(existing.toObject()));
             } else {
               // Duplicate skipped
               skippedCount++;
@@ -998,6 +1122,17 @@ router.post('/excel/import', protect, async (req, res) => {
             }
           } else {
             const nextLeadId = await generateNextLeadId();
+            const scoring = calculateLeadScore({
+              source: row.source || 'Website',
+              status: row.status || 'New',
+              priority: row.priority || 'Medium',
+              estimatedValue: Number(row.estimatedValue) || 0,
+              email: row.email,
+              phone: row.phone,
+              company: row.company,
+              requirement: row.notes,
+            });
+
             const created = await Lead.create({
               name: row.name,
               contactPerson: row.name,
@@ -1019,6 +1154,8 @@ router.post('/excel/import', protect, async (req, res) => {
               requirement: row.notes || '',
               city: row.city || '',
               country: row.country || 'India',
+              leadScore: scoring.score,
+              leadTemperature: scoring.temperature,
               createdBy: req.user._id,
               createdByName: req.user.name || req.user.username,
               activities: [
@@ -1033,7 +1170,7 @@ router.post('/excel/import', protect, async (req, res) => {
               ],
             });
             createdCount++;
-            importedLeads.push(created.toObject());
+            importedLeads.push(enrichLeadWithScoringAndFollowUp(created.toObject()));
           }
         }
       } catch (rowErr) {
@@ -1263,6 +1400,9 @@ router.get('/excel/history', protect, async (req, res) => {
 // @route   GET /api/leads
 // @desc    Get all leads with role-based filtering, search, status, priority, manager, assignedTo, dates, and conversion status
 // @access  Private
+// @route   GET /api/leads
+// @desc    Get all leads with role-based filtering, search, status, priority, manager, assignedTo, dates, temperature, followUpStatus, and conversion status
+// @access  Private
 router.get('/', protect, async (req, res) => {
   try {
     const {
@@ -1276,6 +1416,8 @@ router.get('/', protect, async (req, res) => {
       startDate,
       endDate,
       followUpDate,
+      followUpStatus,
+      temperature,
       sla_tier,
       disposition,
     } = req.query;
@@ -1370,13 +1512,26 @@ router.get('/', protect, async (req, res) => {
         filtered = filtered.filter((l) => (l.source && l.source.toLowerCase() === source.toLowerCase()) || (l.campaign_source && l.campaign_source.toLowerCase() === source.toLowerCase()));
       }
 
-      filtered.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      // Enrich leads with score, temperature, and follow-up status
+      let enriched = filtered.map(enrichLeadWithScoringAndFollowUp);
+
+      // Temperature filter
+      if (temperature && temperature !== 'all') {
+        enriched = enriched.filter((l) => l.leadTemperature?.toLowerCase() === temperature.toLowerCase());
+      }
+
+      // Follow-up status filter
+      if (followUpStatus && followUpStatus !== 'all') {
+        enriched = enriched.filter((l) => (l.followUpStatus || '').toLowerCase().replace(/\s+/g, '_') === followUpStatus.toLowerCase().replace(/\s+/g, '_'));
+      }
+
+      enriched.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
       return res.json({
         success: true,
-        count: filtered.length,
+        count: enriched.length,
         roleScope: isSuperAdmin ? 'Full Organization Access' : (req.user?.role || 'User') === 'Manager' ? 'Manager & Subordinates Access' : 'Personal & Subordinates Access',
-        leads: filtered,
+        leads: enriched,
       });
     } else {
       const queryObj = {};
@@ -1496,13 +1651,22 @@ router.get('/', protect, async (req, res) => {
         queryObj.$and = andConditions;
       }
 
-      const leads = await Lead.find(queryObj).sort({ createdAt: -1 });
+      const rawDbLeads = await Lead.find(queryObj).sort({ createdAt: -1 });
+      let enriched = rawDbLeads.map(enrichLeadWithScoringAndFollowUp);
+
+      if (temperature && temperature !== 'all') {
+        enriched = enriched.filter((l) => l.leadTemperature?.toLowerCase() === temperature.toLowerCase());
+      }
+
+      if (followUpStatus && followUpStatus !== 'all') {
+        enriched = enriched.filter((l) => (l.followUpStatus || '').toLowerCase().replace(/\s+/g, '_') === followUpStatus.toLowerCase().replace(/\s+/g, '_'));
+      }
 
       return res.json({
         success: true,
-        count: leads.length,
+        count: enriched.length,
         roleScope: isSuperAdmin ? 'Full Organization Access' : (req.user?.role || 'User') === 'Manager' ? 'Manager & Subordinates Access' : 'Personal & Subordinates Access',
-        leads,
+        leads: enriched,
       });
     }
   } catch (error) {
@@ -1570,19 +1734,48 @@ router.get('/stats', protect, async (req, res) => {
     const notInterestedLeads = userLeads.filter((l) => l.status === 'Not Interested' || l.disposition_code === 'NOT_INTERESTED').length;
     const invalidLeads = userLeads.filter((l) => l.status === 'Invalid').length;
 
+    // Lead Scoring Distribution
+    const leadScoring = {
+      hot: 0,
+      warm: 0,
+      cold: 0,
+      averageScore: 0,
+    };
+    let totalScoreSum = 0;
+    userLeads.forEach((l) => {
+      const enriched = enrichLeadWithScoringAndFollowUp(l);
+      if (enriched.leadTemperature === 'Hot') leadScoring.hot++;
+      else if (enriched.leadTemperature === 'Cold') leadScoring.cold++;
+      else leadScoring.warm++;
+      totalScoreSum += enriched.leadScore || 50;
+    });
+    leadScoring.averageScore = totalLeads > 0 ? Math.round(totalScoreSum / totalLeads) : 0;
+
     // Follow-Ups stats
     const now = new Date();
     let pendingFollowUps = 0;
     let overdueFollowUps = 0;
+    let dueTodayFollowUps = 0;
+    let upcomingFollowUps = 0;
+    let completedFollowUps = 0;
+    let totalFollowUps = 0;
     const followUpsByUserMap = {};
 
     userLeads.forEach((lead) => {
       const flws = Array.isArray(lead.followups) ? lead.followups : [];
       flws.forEach((f) => {
-        if (f.status === 'Pending') {
+        totalFollowUps++;
+        if (f.status === 'Completed') {
+          completedFollowUps++;
+        } else {
           pendingFollowUps++;
-          if (f.followUpDate && new Date(f.followUpDate) < now) {
+          const status = getFollowUpStatus(f.followUpDate, f.status);
+          if (status === 'Overdue') {
             overdueFollowUps++;
+          } else if (status === 'Due Today') {
+            dueTodayFollowUps++;
+          } else if (status === 'Upcoming') {
+            upcomingFollowUps++;
           }
         }
         const user = f.assignedTo || lead.assignedTo || 'Unassigned';
@@ -1673,11 +1866,24 @@ router.get('/stats', protect, async (req, res) => {
         invalidLeads,
         pendingFollowUps,
         overdueFollowUps,
+        dueTodayFollowUps,
+        upcomingFollowUps,
+        completedFollowUps,
+        totalFollowUps,
         totalCallAttempts,
         connectedCalls,
         noAnswerCalls,
         callbackRequestedCalls,
         conversionRate,
+        leadScoring,
+        followUpMetrics: {
+          total: totalFollowUps,
+          overdue: overdueFollowUps,
+          dueToday: dueTodayFollowUps,
+          upcoming: upcomingFollowUps,
+          completed: completedFollowUps,
+          pending: pendingFollowUps,
+        },
         leadsBySalesUser,
         leadsByManager,
         leadsBySource,
@@ -1727,7 +1933,8 @@ router.get('/:id', protect, async (req, res) => {
       });
     }
 
-    return res.json({ success: true, lead });
+    const enrichedLead = enrichLeadWithScoringAndFollowUp(lead.toObject ? lead.toObject() : lead);
+    return res.json({ success: true, lead: enrichedLead });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to fetch lead', error: error.message });
   }
@@ -1845,6 +2052,8 @@ router.post('/', protect, async (req, res) => {
       mobileNumber: leadPhone,
       email: (email || '').trim().toLowerCase(),
       source: (source || 'Website').trim(),
+      campaign_source: (req.body.campaign_source || source || 'Website Direct').trim(),
+      cost_per_lead: req.body.cost_per_lead !== undefined ? Number(req.body.cost_per_lead) : 0,
       requirement: (requirement || '').trim(),
       status: status || 'New',
       lead_status: (status || 'New').toUpperCase() === 'NEW' ? 'NEW' : 'IN_PROGRESS',
@@ -1878,6 +2087,11 @@ router.post('/', protect, async (req, res) => {
       updatedAt: new Date(),
     };
 
+    // Calculate lead score & temperature
+    const initialScoring = calculateLeadScore(newLeadData);
+    newLeadData.leadScore = initialScoring.score;
+    newLeadData.leadTemperature = initialScoring.temperature;
+
     const io = req.app.get('io');
 
     if (fallbackStore.isFallback) {
@@ -1897,9 +2111,11 @@ router.post('/', protect, async (req, res) => {
         req,
       });
 
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(createdLead);
+
       // Dispatch instant notification to assigned user
       await createLeadAssignmentNotification({
-        lead: createdLead,
+        lead: enrichedLead,
         targetAssignedTo,
         targetUserId,
         assignerUser: req.user,
@@ -1909,7 +2125,7 @@ router.post('/', protect, async (req, res) => {
       return res.status(201).json({
         success: true,
         message: 'Lead created successfully',
-        lead: createdLead,
+        lead: enrichedLead,
       });
     } else {
       const lead = await Lead.create(newLeadData);
@@ -1932,9 +2148,11 @@ router.post('/', protect, async (req, res) => {
         req,
       });
 
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(lead.toObject ? lead.toObject() : lead);
+
       // Dispatch instant notification to assigned user
       await createLeadAssignmentNotification({
-        lead: lead.toObject ? lead.toObject() : lead,
+        lead: enrichedLead,
         targetAssignedTo,
         targetUserId,
         assignerUser: req.user,
@@ -1944,7 +2162,7 @@ router.post('/', protect, async (req, res) => {
       return res.status(201).json({
         success: true,
         message: 'Lead created successfully',
-        lead,
+        lead: enrichedLead,
       });
     }
   } catch (error) {
@@ -2079,6 +2297,8 @@ router.put('/:id', protect, async (req, res) => {
         mobileNumber: leadPhone !== undefined ? leadPhone : existing.mobileNumber || existing.phone,
         email: email !== undefined ? email.trim().toLowerCase() : existing.email,
         source: source !== undefined ? source.trim() : existing.source,
+        campaign_source: req.body.campaign_source !== undefined ? req.body.campaign_source.trim() : (source !== undefined ? source.trim() : existing.campaign_source || existing.source),
+        cost_per_lead: req.body.cost_per_lead !== undefined ? Number(req.body.cost_per_lead) : existing.cost_per_lead || 0,
         requirement: requirement !== undefined ? requirement.trim() : existing.requirement || '',
         status: status || existing.status,
         lead_status: status ? (status.toUpperCase() === 'NEW' ? 'NEW' : status.toUpperCase() === 'LOST' ? 'LOST' : 'IN_PROGRESS') : existing.lead_status,
@@ -2100,19 +2320,37 @@ router.put('/:id', protect, async (req, res) => {
         updatedAt: new Date(),
       };
 
+      // Recalculate lead score & temperature
+      const scoring = calculateLeadScore(updated);
+      updated.leadScore = scoring.score;
+      updated.leadTemperature = scoring.temperature;
+
       fallbackStore.leads[leadIndex] = updated;
       fallbackStore.saveToFile();
+
+      // Compile changes for audit delta
+      const changes = [];
+      if (priorState.status !== updated.status) changes.push(`Status: ${priorState.status} -> ${updated.status}`);
+      if (priorState.priority !== updated.priority) changes.push(`Priority: ${priorState.priority} -> ${updated.priority}`);
+      if (priorState.assignedTo !== updated.assignedTo) changes.push(`Assignee: ${priorState.assignedTo} -> ${updated.assignedTo}`);
+      if (priorState.estimatedValue !== updated.estimatedValue) changes.push(`Value: ₹${priorState.estimatedValue} -> ₹${updated.estimatedValue}`);
+
+      const auditDelta = changes.length > 0
+        ? `Updated lead ${updated.leadId} (${changes.join(', ')})`
+        : `Updated lead details for ${updated.leadId || ''} "${updated.name}"`;
 
       await logAuditAction({
         entity_type: 'Lead',
         entity_id: updated._id,
-        action: 'UPDATE',
+        action: priorState.assignedTo !== updated.assignedTo ? 'ASSIGNMENT' : priorState.status !== updated.status ? 'STATUS_CHANGE' : 'UPDATE',
         operator: req.user,
         prior_state: priorState,
         updated_state: updated,
-        delta: `Updated lead details for ${updated.leadId || ''} "${updated.name}"`,
+        delta: auditDelta,
         req,
       });
+
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(updated);
 
       if (
         assignedTarget !== undefined &&
@@ -2120,7 +2358,7 @@ router.put('/:id', protect, async (req, res) => {
         assignedTarget.trim().toLowerCase() !== (priorState.assignedTo || '').trim().toLowerCase()
       ) {
         await createLeadAssignmentNotification({
-          lead: updated,
+          lead: enrichedLead,
           targetAssignedTo: assignedTarget.trim(),
           targetUserId,
           assignerUser: req.user,
@@ -2128,13 +2366,13 @@ router.put('/:id', protect, async (req, res) => {
           io,
         });
       } else if (io) {
-        io.emit('leads:updated', { lead: updated, action: 'updated' });
+        io.emit('leads:updated', { lead: enrichedLead, action: 'updated' });
       }
 
       return res.json({
         success: true,
         message: 'Lead updated successfully',
-        lead: updated,
+        lead: enrichedLead,
       });
     } else {
       let lead = await Lead.findById(id);
@@ -2175,6 +2413,8 @@ router.put('/:id', protect, async (req, res) => {
       }
       if (email !== undefined) lead.email = email.trim().toLowerCase();
       if (source !== undefined) lead.source = source.trim();
+      if (req.body.campaign_source !== undefined) lead.campaign_source = req.body.campaign_source.trim();
+      if (req.body.cost_per_lead !== undefined) lead.cost_per_lead = Number(req.body.cost_per_lead);
       if (requirement !== undefined) lead.requirement = requirement.trim();
       if (status) {
         lead.status = status;
@@ -2204,6 +2444,11 @@ router.put('/:id', protect, async (req, res) => {
       if (nextFollowUpTime !== undefined) lead.nextFollowUpTime = nextFollowUpTime;
       lead.updatedAt = new Date();
 
+      // Recalculate lead scoring
+      const scoring = calculateLeadScore(lead);
+      lead.leadScore = scoring.score;
+      lead.leadTemperature = scoring.temperature;
+
       await lead.save();
 
       try {
@@ -2214,16 +2459,29 @@ router.put('/:id', protect, async (req, res) => {
         }
       } catch (err) {}
 
+      // Compile changes for audit delta
+      const changes = [];
+      if (priorState.status !== lead.status) changes.push(`Status: ${priorState.status} -> ${lead.status}`);
+      if (priorState.priority !== lead.priority) changes.push(`Priority: ${priorState.priority} -> ${lead.priority}`);
+      if (priorState.assignedTo !== lead.assignedTo) changes.push(`Assignee: ${priorState.assignedTo} -> ${lead.assignedTo}`);
+      if (priorState.estimatedValue !== lead.estimatedValue) changes.push(`Value: ₹${priorState.estimatedValue} -> ₹${lead.estimatedValue}`);
+
+      const auditDelta = changes.length > 0
+        ? `Updated lead ${lead.leadId} (${changes.join(', ')})`
+        : `Updated lead details for ${lead.leadId || ''} "${lead.name}"`;
+
       await logAuditAction({
         entity_type: 'Lead',
         entity_id: lead._id,
-        action: 'UPDATE',
+        action: priorState.assignedTo !== lead.assignedTo ? 'ASSIGNMENT' : priorState.status !== lead.status ? 'STATUS_CHANGE' : 'UPDATE',
         operator: req.user,
         prior_state: priorState,
         updated_state: lead.toObject(),
-        delta: `Updated lead details for ${lead.leadId || ''} "${lead.name}"`,
+        delta: auditDelta,
         req,
       });
+
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(lead);
 
       if (
         assignedTarget !== undefined &&
@@ -2231,7 +2489,7 @@ router.put('/:id', protect, async (req, res) => {
         assignedTarget.trim().toLowerCase() !== (priorState.assignedTo || '').trim().toLowerCase()
       ) {
         await createLeadAssignmentNotification({
-          lead: lead.toObject ? lead.toObject() : lead,
+          lead: enrichedLead,
           targetAssignedTo: assignedTarget.trim(),
           targetUserId,
           assignerUser: req.user,
@@ -2239,13 +2497,13 @@ router.put('/:id', protect, async (req, res) => {
           io,
         });
       } else if (io) {
-        io.emit('leads:updated', { lead, action: 'updated' });
+        io.emit('leads:updated', { lead: enrichedLead, action: 'updated' });
       }
 
       return res.json({
         success: true,
         message: 'Lead updated successfully',
-        lead,
+        lead: enrichedLead,
       });
     }
   } catch (error) {
@@ -2326,12 +2584,17 @@ router.patch('/:id/status', protect, async (req, res) => {
         timestamp: new Date(),
       });
 
+      // Recalculate scoring
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
       fallbackStore.saveToFile();
 
       await logAuditAction({
         entity_type: 'Lead',
         entity_id: targetLead._id,
-        action: 'UPDATE',
+        action: 'STATUS_CHANGE',
         operator: req.user,
         prior_state: priorState,
         updated_state: targetLead,
@@ -2339,14 +2602,16 @@ router.patch('/:id/status', protect, async (req, res) => {
         req,
       });
 
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead);
+
       if (io) {
-        io.emit('leads:updated', { lead: targetLead, action: 'status_updated' });
+        io.emit('leads:updated', { lead: enrichedLead, action: 'status_updated' });
       }
 
       return res.json({
         success: true,
         message: `Lead status updated to ${status}`,
-        lead: targetLead,
+        lead: enrichedLead,
       });
     } else {
       targetLead = await Lead.findById(id);
@@ -2397,6 +2662,10 @@ router.patch('/:id/status', protect, async (req, res) => {
         timestamp: new Date(),
       });
 
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
       await targetLead.save();
 
       try {
@@ -2410,7 +2679,7 @@ router.patch('/:id/status', protect, async (req, res) => {
       await logAuditAction({
         entity_type: 'Lead',
         entity_id: targetLead._id,
-        action: 'UPDATE',
+        action: 'STATUS_CHANGE',
         operator: req.user,
         prior_state: priorState,
         updated_state: targetLead.toObject(),
@@ -2418,14 +2687,16 @@ router.patch('/:id/status', protect, async (req, res) => {
         req,
       });
 
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead.toObject ? targetLead.toObject() : targetLead);
+
       if (io) {
-        io.emit('leads:updated', { lead: targetLead, action: 'status_updated' });
+        io.emit('leads:updated', { lead: enrichedLead, action: 'status_updated' });
       }
 
       return res.json({
         success: true,
         message: `Lead status updated to ${status}`,
-        lead: targetLead,
+        lead: enrichedLead,
       });
     }
   } catch (error) {
@@ -2514,12 +2785,16 @@ router.post('/:id/qualify', protect, async (req, res) => {
         timestamp: new Date(),
       });
 
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
       fallbackStore.saveToFile();
 
       await logAuditAction({
         entity_type: 'Lead',
         entity_id: targetLead._id,
-        action: 'UPDATE',
+        action: 'STATUS_CHANGE',
         operator: req.user,
         prior_state: priorState,
         updated_state: targetLead,
@@ -2527,14 +2802,16 @@ router.post('/:id/qualify', protect, async (req, res) => {
         req,
       });
 
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead);
+
       if (io) {
-        io.emit('leads:updated', { lead: targetLead, action: 'qualified' });
+        io.emit('leads:updated', { lead: enrichedLead, action: 'qualified' });
       }
 
       return res.json({
         success: true,
         message: `Lead ${targetLead.leadId || ''} successfully marked as Qualified`,
-        lead: targetLead,
+        lead: enrichedLead,
       });
     } else {
       targetLead = await Lead.findById(id);
@@ -2587,6 +2864,10 @@ router.post('/:id/qualify', protect, async (req, res) => {
         timestamp: new Date(),
       });
 
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
       await targetLead.save();
 
       try {
@@ -2600,7 +2881,7 @@ router.post('/:id/qualify', protect, async (req, res) => {
       await logAuditAction({
         entity_type: 'Lead',
         entity_id: targetLead._id,
-        action: 'UPDATE',
+        action: 'STATUS_CHANGE',
         operator: req.user,
         prior_state: priorState,
         updated_state: targetLead.toObject(),
@@ -2608,14 +2889,16 @@ router.post('/:id/qualify', protect, async (req, res) => {
         req,
       });
 
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead.toObject ? targetLead.toObject() : targetLead);
+
       if (io) {
-        io.emit('leads:updated', { lead: targetLead, action: 'qualified' });
+        io.emit('leads:updated', { lead: enrichedLead, action: 'qualified' });
       }
 
       return res.json({
         success: true,
         message: `Lead ${targetLead.leadId || ''} successfully marked as Qualified`,
-        lead: targetLead,
+        lead: enrichedLead,
       });
     }
   } catch (error) {
@@ -2731,6 +3014,11 @@ router.post('/:id/calls', protect, async (req, res) => {
         timestamp: new Date(),
       });
 
+      // Recalculate lead score
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
       targetLead.updatedAt = new Date();
       fallbackStore.saveToFile();
 
@@ -2744,15 +3032,17 @@ router.post('/:id/calls', protect, async (req, res) => {
         req,
       });
 
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead);
+
       if (io) {
-        io.emit('leads:updated', { lead: targetLead, action: 'call_logged' });
+        io.emit('leads:updated', { lead: enrichedLead, action: 'call_logged' });
       }
 
       return res.status(201).json({
         success: true,
         message: 'Communication call log recorded successfully',
         callLog: newCallLog,
-        lead: targetLead,
+        lead: enrichedLead,
       });
     } else {
       targetLead = await Lead.findById(id);
@@ -2828,6 +3118,10 @@ router.post('/:id/calls', protect, async (req, res) => {
         timestamp: new Date(),
       });
 
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
       targetLead.updatedAt = new Date();
       await targetLead.save();
 
@@ -2849,15 +3143,17 @@ router.post('/:id/calls', protect, async (req, res) => {
         req,
       });
 
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead.toObject ? targetLead.toObject() : targetLead);
+
       if (io) {
-        io.emit('leads:updated', { lead: targetLead, action: 'call_logged' });
+        io.emit('leads:updated', { lead: enrichedLead, action: 'call_logged' });
       }
 
       return res.status(201).json({
         success: true,
         message: 'Communication call log recorded successfully',
         callLog: newCallLog,
-        lead: targetLead,
+        lead: enrichedLead,
       });
     }
   } catch (error) {
@@ -2950,11 +3246,27 @@ router.post('/:id/followups', protect, async (req, res) => {
         timestamp: new Date(),
       });
 
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
       targetLead.updatedAt = new Date();
       fallbackStore.saveToFile();
 
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: targetLead._id,
+        action: 'FOLLOWUP_SCHEDULED',
+        operator: req.user,
+        updated_state: targetLead,
+        delta: `Scheduled follow-up for ${targetLead.leadId} on ${new Date(followUpDate).toLocaleDateString()}`,
+        req,
+      });
+
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead);
+
       await createFollowUpNotification({
-        lead: targetLead,
+        lead: enrichedLead,
         followUp: newFollowUp,
         assignerUser: req.user,
         io,
@@ -2964,7 +3276,7 @@ router.post('/:id/followups', protect, async (req, res) => {
         success: true,
         message: 'Follow-up scheduled successfully',
         followup: newFollowUp,
-        lead: targetLead,
+        lead: enrichedLead,
       });
     } else {
       targetLead = await Lead.findById(id);
@@ -3002,11 +3314,27 @@ router.post('/:id/followups', protect, async (req, res) => {
         timestamp: new Date(),
       });
 
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
       targetLead.updatedAt = new Date();
       await targetLead.save();
 
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: targetLead._id,
+        action: 'FOLLOWUP_SCHEDULED',
+        operator: req.user,
+        updated_state: targetLead.toObject(),
+        delta: `Scheduled follow-up for ${targetLead.leadId} on ${new Date(followUpDate).toLocaleDateString()}`,
+        req,
+      });
+
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead.toObject ? targetLead.toObject() : targetLead);
+
       await createFollowUpNotification({
-        lead: targetLead.toObject ? targetLead.toObject() : targetLead,
+        lead: enrichedLead,
         followUp: newFollowUp,
         assignerUser: req.user,
         io,
@@ -3016,7 +3344,7 @@ router.post('/:id/followups', protect, async (req, res) => {
         success: true,
         message: 'Follow-up scheduled successfully',
         followup: newFollowUp,
-        lead: targetLead,
+        lead: enrichedLead,
       });
     }
   } catch (error) {
@@ -3088,12 +3416,28 @@ router.put('/:id/followups/:followUpId', protect, async (req, res) => {
         });
       }
 
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
       targetLead.updatedAt = new Date();
       fallbackStore.saveToFile();
 
-      if (io) io.emit('leads:updated', { lead: targetLead, action: 'followup_updated' });
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: targetLead._id,
+        action: status === 'Completed' ? 'FOLLOWUP_COMPLETED' : 'FOLLOWUP_UPDATED',
+        operator: req.user,
+        updated_state: targetLead,
+        delta: `Updated follow-up (${flw.reason || 'Follow-up'}) to ${status || 'Updated'} for ${targetLead.leadId}`,
+        req,
+      });
 
-      return res.json({ success: true, message: 'Follow-up updated successfully', followup: flw, lead: targetLead });
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead);
+
+      if (io) io.emit('leads:updated', { lead: enrichedLead, action: 'followup_updated' });
+
+      return res.json({ success: true, message: 'Follow-up updated successfully', followup: flw, lead: enrichedLead });
     } else {
       targetLead = await Lead.findById(id);
       if (!targetLead) targetLead = await Lead.findOne({ $or: [{ lead_id: id }, { leadId: id }] });
@@ -3121,12 +3465,28 @@ router.put('/:id/followups/:followUpId', protect, async (req, res) => {
         });
       }
 
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
       targetLead.updatedAt = new Date();
       await targetLead.save();
 
-      if (io) io.emit('leads:updated', { lead: targetLead, action: 'followup_updated' });
+      await logAuditAction({
+        entity_type: 'Lead',
+        entity_id: targetLead._id,
+        action: status === 'Completed' ? 'FOLLOWUP_COMPLETED' : 'FOLLOWUP_UPDATED',
+        operator: req.user,
+        updated_state: targetLead.toObject(),
+        delta: `Updated follow-up (${flw.reason || 'Follow-up'}) to ${status || 'Updated'} for ${targetLead.leadId}`,
+        req,
+      });
 
-      return res.json({ success: true, message: 'Follow-up updated successfully', followup: flw, lead: targetLead });
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead.toObject ? targetLead.toObject() : targetLead);
+
+      if (io) io.emit('leads:updated', { lead: enrichedLead, action: 'followup_updated' });
+
+      return res.json({ success: true, message: 'Follow-up updated successfully', followup: flw, lead: enrichedLead });
     }
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to update follow-up', error: error.message });
@@ -3254,7 +3614,7 @@ router.post('/:id/convert', protect, async (req, res) => {
         probability,
         expectedCloseDate: expectedCloseDate ? new Date(expectedCloseDate) : null,
         priority: targetLead.priority || 'Medium',
-        cost_per_lead: targetLead.cost_per_lead || 25.0,
+        cost_per_lead: Number(targetLead.cost_per_lead || 0),
         assignedTo: oppAssignedTo,
         assignedBy: `${req.user?.name || 'User'} (${req.user?.role || 'User'})`,
         assignedById: assignerIdStr,
@@ -3293,6 +3653,10 @@ router.post('/:id/convert', protect, async (req, res) => {
         timestamp: new Date(),
       });
 
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
       targetLead.updatedAt = new Date();
       fallbackStore.saveToFile();
 
@@ -3307,15 +3671,17 @@ router.post('/:id/convert', protect, async (req, res) => {
         req,
       });
 
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead);
+
       if (io) {
-        io.emit('leads:updated', { lead: targetLead, action: 'converted' });
+        io.emit('leads:updated', { lead: enrichedLead, action: 'converted' });
         io.emit('opportunities:updated', { opportunity: oppData, action: 'created' });
       }
 
       return res.status(201).json({
         success: true,
         message: `Lead ${targetLead.leadId} successfully converted to Opportunity ${generatedOppReadableId}`,
-        lead: targetLead,
+        lead: enrichedLead,
         opportunity: oppData,
       });
     } else {
@@ -3418,7 +3784,7 @@ router.post('/:id/convert', protect, async (req, res) => {
         probability,
         expectedCloseDate: expectedCloseDate ? new Date(expectedCloseDate) : null,
         priority: targetLead.priority || 'Medium',
-        cost_per_lead: targetLead.cost_per_lead || 25.0,
+        cost_per_lead: Number(targetLead.cost_per_lead || 0),
         assignedTo: oppAssignedTo,
         assignedBy: `${req.user?.name || 'User'} (${req.user?.role || 'User'})`,
         assignedById: assignerIdStr,
@@ -3453,6 +3819,10 @@ router.post('/:id/convert', protect, async (req, res) => {
         timestamp: new Date(),
       });
 
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
       targetLead.updatedAt = new Date();
       await targetLead.save();
 
@@ -3478,15 +3848,17 @@ router.post('/:id/convert', protect, async (req, res) => {
         req,
       });
 
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead.toObject ? targetLead.toObject() : targetLead);
+
       if (io) {
-        io.emit('leads:updated', { lead: targetLead, action: 'converted' });
+        io.emit('leads:updated', { lead: enrichedLead, action: 'converted' });
         io.emit('opportunities:updated', { opportunity, action: 'created' });
       }
 
       return res.status(201).json({
         success: true,
         message: `Lead ${targetLead.leadId} successfully converted to Opportunity ${generatedOppReadableId}`,
-        lead: targetLead,
+        lead: enrichedLead,
         opportunity,
       });
     }
@@ -3624,11 +3996,12 @@ router.post('/filter', protect, async (req, res) => {
     }
 
     if (!Array.isArray(rules) || rules.length === 0) {
+      const enrichedAll = allLeads.map(enrichLeadWithScoringAndFollowUp);
       return res.json({
         success: true,
-        count: allLeads.length,
+        count: enrichedAll.length,
         executionTimeMs: Date.now() - startTime,
-        leads: allLeads,
+        leads: enrichedAll,
       });
     }
 
@@ -3718,13 +4091,15 @@ router.post('/filter', protect, async (req, res) => {
       return rules.every((rule) => evaluateRule(lead, rule));
     });
 
+    const enrichedFiltered = filteredLeads.map(enrichLeadWithScoringAndFollowUp);
+
     res.json({
       success: true,
-      count: filteredLeads.length,
+      count: enrichedFiltered.length,
       executionTimeMs: Date.now() - startTime,
       appliedRulesCount: rules.length,
       logic,
-      leads: filteredLeads,
+      leads: enrichedFiltered,
     });
   } catch (error) {
     console.error('Filter engine error:', error);
@@ -3850,6 +4225,10 @@ router.post('/:id/disposition', protect, async (req, res) => {
         timestamp: new Date(),
       });
 
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
       targetLead.updatedAt = new Date();
       fallbackStore.saveToFile();
 
@@ -3864,8 +4243,10 @@ router.post('/:id/disposition', protect, async (req, res) => {
         req,
       });
 
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead);
+
       if (io) {
-        io.emit('leads:updated', { lead: targetLead, action: 'disposition_logged' });
+        io.emit('leads:updated', { lead: enrichedLead, action: 'disposition_logged' });
         io.emit('disposition:logged', { leadId: targetLead._id, disposition_code, agentName });
       }
 
@@ -3873,7 +4254,7 @@ router.post('/:id/disposition', protect, async (req, res) => {
         success: true,
         message: `Disposition "${disposition_code}" logged successfully.`,
         systemActionExecuted,
-        lead: targetLead,
+        lead: enrichedLead,
       });
     } else {
       targetLead = await Lead.findById(id);
@@ -3962,6 +4343,10 @@ router.post('/:id/disposition', protect, async (req, res) => {
         timestamp: new Date(),
       });
 
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
       targetLead.updatedAt = new Date();
       await targetLead.save();
 
@@ -3984,8 +4369,10 @@ router.post('/:id/disposition', protect, async (req, res) => {
         req,
       });
 
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead.toObject ? targetLead.toObject() : targetLead);
+
       if (io) {
-        io.emit('leads:updated', { lead: targetLead.toObject(), action: 'disposition_logged' });
+        io.emit('leads:updated', { lead: enrichedLead, action: 'disposition_logged' });
         io.emit('disposition:logged', { leadId: targetLead._id, disposition_code, agentName });
       }
 
@@ -3993,7 +4380,7 @@ router.post('/:id/disposition', protect, async (req, res) => {
         success: true,
         message: `Disposition "${disposition_code}" logged successfully.`,
         systemActionExecuted,
-        lead: targetLead,
+        lead: enrichedLead,
       });
     }
   } catch (error) {
@@ -4034,8 +4421,12 @@ router.post('/:id/claim', protect, async (req, res) => {
       targetLead.sla_tier = 0;
       targetLead.status = 'In Progress';
       targetLead.lead_status = 'IN_PROGRESS';
-      targetLead.updatedAt = new Date();
 
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
+      targetLead.updatedAt = new Date();
       fallbackStore.saveToFile();
 
       await logAuditAction({
@@ -4049,8 +4440,10 @@ router.post('/:id/claim', protect, async (req, res) => {
         req,
       });
 
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead);
+
       await createLeadAssignmentNotification({
-        lead: targetLead,
+        lead: enrichedLead,
         targetAssignedTo: claimerName,
         targetUserId: claimerId,
         assignerUser: req.user,
@@ -4060,7 +4453,7 @@ router.post('/:id/claim', protect, async (req, res) => {
       return res.json({
         success: true,
         message: `Lead successfully claimed by ${claimerName}`,
-        lead: targetLead,
+        lead: enrichedLead,
       });
     } else {
       targetLead = await Lead.findById(id);
@@ -4076,6 +4469,11 @@ router.post('/:id/claim', protect, async (req, res) => {
       targetLead.sla_tier = 0;
       targetLead.status = 'In Progress';
       targetLead.lead_status = 'IN_PROGRESS';
+
+      const scoring = calculateLeadScore(targetLead);
+      targetLead.leadScore = scoring.score;
+      targetLead.leadTemperature = scoring.temperature;
+
       targetLead.updatedAt = new Date();
       await targetLead.save();
 
@@ -4090,8 +4488,10 @@ router.post('/:id/claim', protect, async (req, res) => {
         req,
       });
 
+      const enrichedLead = enrichLeadWithScoringAndFollowUp(targetLead.toObject ? targetLead.toObject() : targetLead);
+
       await createLeadAssignmentNotification({
-        lead: targetLead.toObject ? targetLead.toObject() : targetLead,
+        lead: enrichedLead,
         targetAssignedTo: claimerName,
         targetUserId: claimerId,
         assignerUser: req.user,
@@ -4101,7 +4501,7 @@ router.post('/:id/claim', protect, async (req, res) => {
       return res.json({
         success: true,
         message: `Lead successfully claimed by ${claimerName}`,
-        lead: targetLead,
+        lead: enrichedLead,
       });
     }
   } catch (err) {
