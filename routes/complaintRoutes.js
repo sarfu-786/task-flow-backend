@@ -3,13 +3,29 @@ const router = express.Router();
 const XLSX = require('xlsx');
 const Complaint = require('../models/Complaint');
 const User = require('../models/User');
+const Lead = require('../models/Lead');
+const Opportunity = require('../models/Opportunity');
+const Task = require('../models/Task');
+const Project = require('../models/Project');
+const Notification = require('../models/Notification');
 const { protect } = require('../middleware/auth');
 const { fallbackStore } = require('../config/db');
 const { logAuditAction } = require('../services/auditService');
 const {
+  sendComplaintNotifications,
+  sendComplaintAssignmentEmail,
+} = require('../services/emailService');
+const { resolveComplaintLocation } = require('../services/locationService');
+const {
   getAllUsers,
   getUserScopeContext,
   isComplaintAccessible,
+  isLeadAccessible,
+  isOpportunityAccessible,
+  isCustomerAccessibleForUser,
+  getReportingManager,
+  getAuthorizedEscalationRecipients,
+  escapeRegex,
 } = require('../services/hierarchyService');
 
 // Helper to check if Complaint Management module is active
@@ -30,6 +46,52 @@ const requireComplaintModule = (req, res, next) => {
   next();
 };
 
+// Helper to generate unique ticket numbers dynamically using the system date and database sequence (Format: CMP-YYYY-XXXXX)
+const generateDynamicTicketNumber = async (year = new Date().getFullYear()) => {
+  const prefix = `CMP-${year}-`;
+
+  if (fallbackStore.isFallback) {
+    const list = fallbackStore.complaints || [];
+    let maxNum = 0;
+    for (const c of list) {
+      if (c && c.ticketNumber && c.ticketNumber.startsWith(prefix)) {
+        const numPart = parseInt(c.ticketNumber.replace(prefix, ''), 10);
+        if (!isNaN(numPart) && numPart > maxNum) {
+          maxNum = numPart;
+        }
+      }
+    }
+    let nextSeq = maxNum + 1;
+    let candidate = `${prefix}${String(nextSeq).padStart(5, '0')}`;
+    while (list.some((c) => c && c.ticketNumber === candidate)) {
+      nextSeq++;
+      candidate = `${prefix}${String(nextSeq).padStart(5, '0')}`;
+    }
+    return candidate;
+  } else {
+    try {
+      const latest = await Complaint.findOne({
+        ticketNumber: new RegExp(`^${prefix}`),
+      })
+        .sort({ ticketNumber: -1 })
+        .select('ticketNumber')
+        .lean();
+
+      let nextSeq = 1;
+      if (latest && latest.ticketNumber) {
+        const numPart = parseInt(latest.ticketNumber.replace(prefix, ''), 10);
+        if (!isNaN(numPart)) {
+          nextSeq = numPart + 1;
+        }
+      }
+      return `${prefix}${String(nextSeq).padStart(5, '0')}`;
+    } catch {
+      const count = await Complaint.countDocuments({ ticketNumber: new RegExp(`^${prefix}`) });
+      return `${prefix}${String(count + 1).padStart(5, '0')}`;
+    }
+  }
+};
+
 // Helper to generate unique ticket numbers
 const generateTicketNumber = (existingComplaints = []) => {
   const count = existingComplaints.length + 1;
@@ -46,7 +108,7 @@ const computeSlaDeadline = (priority, hoursOverride) => {
   if (hoursOverride && !isNaN(Number(hoursOverride))) {
     hours = Number(hoursOverride);
     firstResponseHours = Math.max(1, Math.round(hours / 4));
-  } else if (priority === 'Urgent') {
+  } else if (priority === 'Critical' || priority === 'Urgent') {
     hours = 4;
     firstResponseHours = 1;
   } else if (priority === 'High') {
@@ -85,6 +147,155 @@ const getComputedSlaStatus = (complaint) => {
   if (hoursLeft < 0) return 'Breached';
   if (hoursLeft <= 4) return 'At Risk';
   return 'On Track';
+};
+
+// Helper to create and dispatch in-app notification, real-time socket events & email for complaint assignment
+const createComplaintAssignmentNotification = async ({
+  complaint,
+  assignedTo,
+  assignedToName,
+  assignedBy,
+  allUsers = [],
+  io,
+  isReassignment = false,
+  reason = '',
+}) => {
+  if (!assignedToName || assignedToName === 'Unassigned') return null;
+
+  try {
+    if (!allUsers || allUsers.length === 0) {
+      allUsers = await getAllUsers();
+    }
+
+    let targetUser = null;
+    if (assignedTo) {
+      targetUser = allUsers.find(
+        (u) =>
+          (u._id && u._id.toString() === assignedTo.toString()) ||
+          (u.id && u.id.toString() === assignedTo.toString())
+      );
+    }
+    if (!targetUser && assignedToName) {
+      targetUser = allUsers.find(
+        (u) =>
+          (u.name && u.name.toLowerCase().trim() === assignedToName.toLowerCase().trim()) ||
+          (u.username && u.username.toLowerCase().trim() === assignedToName.toLowerCase().trim())
+      );
+    }
+
+    const recipientUserId = targetUser ? (targetUser._id || targetUser.id) : assignedTo;
+    const recipientName = assignedToName || (targetUser ? targetUser.name : '');
+    const recipientUsername = targetUser?.username || '';
+    const assignerName = assignedBy?.name || 'Super Admin';
+
+    const notifId = 'notif_cmp_' + Date.now() + '_' + Math.random().toString(16).substring(2, 8);
+    const notifTitle = isReassignment
+      ? `Ticket Reassigned: ${complaint.ticketNumber}`
+      : `New Ticket Assigned: ${complaint.ticketNumber}`;
+    const notifMessage = isReassignment
+      ? `${assignerName} reassigned complaint ticket "${complaint.ticketNumber}" to you (${complaint.customerName}: ${complaint.subject}).`
+      : `${assignerName} assigned you a new complaint ticket "${complaint.ticketNumber}" (${complaint.customerName}: ${complaint.subject}). Priority: ${complaint.priority || 'Medium'}.`;
+
+    const notifData = {
+      _id: notifId,
+      user: recipientUserId || null,
+      recipientUser: recipientUserId || null,
+      recipientName: recipientName,
+      userName: assignerName,
+      userAvatar: assignedBy?.avatar || '',
+      assignedBy: assignerName,
+      complaintId: complaint._id || null,
+      complaintTicketNumber: complaint.ticketNumber,
+      ticketNumber: complaint.ticketNumber,
+      customerName: complaint.customerName || '',
+      priority: complaint.priority || 'Medium',
+      taskDescription: `${complaint.subject || ''} (${complaint.customerName || ''})`,
+      taskType: 'complaint',
+      type: 'complaint_assigned',
+      title: notifTitle,
+      message: notifMessage,
+      forRole: 'DirectRecipientOnly',
+      isRead: false,
+      createdAt: new Date(),
+    };
+
+    let savedNotification = { ...notifData };
+
+    if (fallbackStore.isFallback) {
+      if (!fallbackStore.notifications) fallbackStore.notifications = [];
+      fallbackStore.notifications.unshift(savedNotification);
+      fallbackStore.saveToFile();
+    } else {
+      try {
+        const mongoPayload = { ...notifData };
+        delete mongoPayload._id;
+        const created = await Notification.create(mongoPayload);
+        savedNotification = created.toObject ? created.toObject() : created;
+      } catch (dbErr) {
+        console.warn('[Complaint Notification Write Warning]:', dbErr.message);
+      }
+      if (!fallbackStore.notifications) fallbackStore.notifications = [];
+      fallbackStore.notifications.unshift(savedNotification);
+      fallbackStore.saveToFile();
+    }
+
+    if (io) {
+      const socketPayload = {
+        ...savedNotification,
+        _id: savedNotification._id || notifId,
+        notification: savedNotification,
+        complaint,
+        type: 'complaint_assigned',
+        timestamp: savedNotification.createdAt,
+      };
+
+      if (recipientUserId) {
+        io.to(`user:${recipientUserId.toString()}`).emit('notification:new', socketPayload);
+        io.to(`user:${recipientUserId.toString()}`).emit('notification', socketPayload);
+        io.to(`user:${recipientUserId.toString()}`).emit('notification:updated');
+      }
+      if (recipientName) {
+        const cleanName = recipientName.toLowerCase().trim();
+        io.to(`user:${cleanName}`).emit('notification:new', socketPayload);
+        io.to(`user:${cleanName}`).emit('notification', socketPayload);
+        io.to(`user:${cleanName}`).emit('notification:updated');
+      }
+      if (recipientUsername) {
+        const cleanUser = recipientUsername.toLowerCase().trim();
+        io.to(`user:${cleanUser}`).emit('notification:new', socketPayload);
+        io.to(`user:${cleanUser}`).emit('notification', socketPayload);
+        io.to(`user:${cleanUser}`).emit('notification:updated');
+      }
+
+      // Broadcast for live toast display & badge synchronization
+      io.emit('notification:new', socketPayload);
+      io.emit('notification', socketPayload);
+      io.emit('notification:updated');
+    }
+
+    // Dispatch Assignment Email to the assigned user
+    let emailStatus = null;
+    if (targetUser && targetUser.email && targetUser.email.includes('@')) {
+      try {
+        emailStatus = await sendComplaintAssignmentEmail({
+          complaint,
+          assignedUser: targetUser,
+          assignedBy,
+          reason,
+          isReassignment,
+        });
+        console.log(`[Complaint Assignment Email Status to ${targetUser.email}]:`, emailStatus?.status);
+      } catch (emailErr) {
+        console.error('[Complaint Assignment Email Error]:', emailErr.message);
+        emailStatus = { status: 'Failed', recipient: targetUser.email, error: emailErr.message };
+      }
+    }
+
+    return { ...savedNotification, emailStatus, recipientUser: targetUser };
+  } catch (err) {
+    console.error('[Complaint Assignment Notification Dispatch Error]:', err.message);
+    return null;
+  }
 };
 
 /**
@@ -211,7 +422,7 @@ router.get('/excel/template', protect, requireComplaintModule, (req, res) => {
       { 'Field': 'Customer Name *', 'Mandatory': 'YES', 'Description': 'Name of the customer or account filing the complaint.' },
       { 'Field': 'Subject *', 'Mandatory': 'YES', 'Description': 'Concise issue title or summary.' },
       { 'Field': 'Description *', 'Mandatory': 'YES', 'Description': 'Detailed description of the incident, grievance or defect.' },
-      { 'Field': 'Category', 'Mandatory': 'Optional', 'Description': 'Allowed: Technical / API, Billing & Invoicing, Product Quality, Service Delivery, Account & Access, Security & Compliance, Performance & Latency, General Inquiry (Default: Technical / API)' },
+      { 'Field': 'Category', 'Mandatory': 'Optional', 'Description': 'Allowed: Customer Support & Helpdesk, Technical & IT Support (Backend & Systems), Sales & Business Development (Sells), Operations & Field Logistics, Accounts & Billing (Finance), Documentation & Quality (Back Office), Social Media & Marketing, Internet & Network Work (Legacy Support)' },
       { 'Field': 'Complaint Type', 'Mandatory': 'Optional', 'Description': 'Allowed: Incident, Defect, Service Request, Billing Dispute, SLA Grievance, Customer Feedback (Default: Incident)' },
       { 'Field': 'Priority', 'Mandatory': 'Optional', 'Description': 'Allowed: Urgent (4h SLA), High (12h SLA), Medium (24h SLA), Low (48h SLA) (Default: Medium)' },
       { 'Field': 'Severity', 'Mandatory': 'Optional', 'Description': 'Allowed: Critical, Major, Moderate, Minor (Default: Moderate)' },
@@ -1776,6 +1987,749 @@ router.get('/', protect, requireComplaintModule, async (req, res) => {
   }
 });
 
+// @route   GET /api/complaints/customers
+// @desc    Get genuine database-driven customer records scoped by user hierarchy
+// @access  Private
+router.get('/customers', protect, requireComplaintModule, async (req, res) => {
+  try {
+    const allUsers = await getAllUsers();
+    const scope = getUserScopeContext(req.user, allUsers);
+    let scopedLeads = [];
+
+    if (fallbackStore.isFallback) {
+      if (!fallbackStore.leads || fallbackStore.leads.length === 0) {
+        fallbackStore.loadFromFile();
+        if (!fallbackStore.leads || fallbackStore.leads.length === 0) {
+          fallbackStore.leads = fallbackStore.loadBackupLeads();
+        }
+      }
+      const allLeads = fallbackStore.leads || [];
+      scopedLeads = scope.isSuperAdmin
+        ? allLeads
+        : allLeads.filter((l) => isCustomerAccessibleForUser(req.user, l, allUsers));
+    } else {
+      let leadsQuery = {};
+      if (!scope.isSuperAdmin) {
+        const allowedUserIdsArr = Array.from(scope.allowedUserIds || []);
+        const allowedNamesArr = Array.from(scope.allowedNames || []);
+
+        leadsQuery = {
+          $or: [
+            { user: { $in: allowedUserIdsArr } },
+            { assignedToId: { $in: allowedUserIdsArr } },
+            { assignedById: { $in: allowedUserIdsArr } },
+            { createdBy: { $in: allowedUserIdsArr } },
+            { assignedTo: { $in: allowedNamesArr.map((n) => new RegExp(`^${escapeRegex(n)}$`, 'i')) } },
+            { assignedSalesUser: { $in: allowedNamesArr.map((n) => new RegExp(`^${escapeRegex(n)}$`, 'i')) } },
+          ],
+        };
+      }
+      scopedLeads = await Lead.find(leadsQuery).sort({ createdAt: -1 }).lean();
+      if ((!scopedLeads || scopedLeads.length === 0) && fallbackStore.leads && fallbackStore.leads.length > 0) {
+        scopedLeads = scope.isSuperAdmin
+          ? fallbackStore.leads
+          : fallbackStore.leads.filter((l) => isCustomerAccessibleForUser(req.user, l, allUsers));
+      }
+    }
+
+    // Extract genuine customers with valid names, filtering out any test or mock leads
+    const isFakeCustomer = (lead) => {
+      if (!lead) return true;
+      const n = (lead.name || lead.contactPerson || '').trim();
+      const e = (lead.email || '').trim().toLowerCase();
+      const id = (lead._id || '').toString();
+      const c = (lead.company || '').trim();
+      if (/Aarav Verma_\d+/i.test(n)) return true;
+      if (/Cold Prospect_\d+/i.test(n)) return true;
+      if (/MIS Test Enterprise/i.test(n)) return true;
+      if (/Confidential Enterprise Lead/i.test(n)) return true;
+      if (/Unqualified Test Lead/i.test(n)) return true;
+      if (/Vikram Malhotra/i.test(n)) return true;
+      if (/Customer With No Email/i.test(n)) return true;
+      if (/Isolated Hierarchy Customer Inc/i.test(n)) return true;
+      if (/lead_no_email_/i.test(id)) return true;
+      if (/vikram_179/i.test(e)) return true;
+      if (/vikram\.m@acmeapex/i.test(e)) return true;
+      if (/smallshop\.com/i.test(e)) return true;
+      if (/entcorp\.com/i.test(e)) return true;
+      if (/Acme Apex Corp/i.test(c)) return true;
+      return false;
+    };
+
+    const genuineCustomers = scopedLeads
+      .filter((lead) => lead && (lead.name || lead.contactPerson) && !isFakeCustomer(lead))
+      .map((lead) => {
+        const idStr = lead._id ? lead._id.toString() : (lead.leadId || lead.lead_id || '');
+        const nameStr = (lead.name || lead.contactPerson || '').trim();
+        const emailStr = (lead.email || '').trim().toLowerCase();
+        const phoneStr = (lead.phone || lead.mobileNumber || '').trim();
+        const companyStr = (lead.company || '').trim();
+
+        return {
+          _id: idStr,
+          customerId: idStr,
+          customerName: nameStr,
+          customerEmail: emailStr,
+          customerPhone: phoneStr,
+          organization: companyStr,
+          leadId: lead.leadId || lead.lead_id || '',
+          status: lead.status || '',
+        };
+      });
+
+    // Also include any converted leads / opportunities adhering strictly to user hierarchy permissions
+    if (!fallbackStore.isFallback) {
+      try {
+        const opps = await Opportunity.find({}).sort({ createdAt: -1 }).lean();
+        const accessibleOpps = scope.isSuperAdmin
+          ? opps
+          : opps.filter((opp) => isOpportunityAccessible(scope, opp));
+
+        accessibleOpps.forEach((opp) => {
+          const oppName = (opp.contactPerson || opp.name || '').trim();
+          if (oppName && !isFakeCustomer(opp)) {
+            genuineCustomers.push({
+              _id: (opp._id || opp.opportunity_id || '').toString(),
+              customerId: (opp._id || opp.opportunity_id || '').toString(),
+              customerName: oppName,
+              customerEmail: (opp.email || '').trim().toLowerCase(),
+              customerPhone: (opp.phone || '').trim(),
+              organization: (opp.company || '').trim(),
+              leadId: opp.leadId || opp.originalLeadId || '',
+              status: 'Converted',
+            });
+          }
+        });
+      } catch (oppErr) {}
+    }
+
+    // Deduplicate by customer name and email/organization
+    const customerMap = new Map();
+    const seenKeys = new Set();
+    genuineCustomers.forEach((c) => {
+      const uniqueKey = (c.customerName.toLowerCase() + '|' + (c.customerEmail || c.organization || '').toLowerCase());
+      if (c._id && !customerMap.has(c._id) && !seenKeys.has(uniqueKey)) {
+        customerMap.set(c._id, c);
+        seenKeys.add(uniqueKey);
+      }
+    });
+
+    const sortedCustomers = Array.from(customerMap.values()).sort((a, b) =>
+      a.customerName.localeCompare(b.customerName)
+    );
+
+    return res.json({
+      success: true,
+      count: sortedCustomers.length,
+      customers: sortedCustomers,
+    });
+  } catch (err) {
+    console.error('[Get Complaint Customers Error]', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch customer records from database.',
+    });
+  }
+});
+
+// @route   GET /api/complaints/escalation-recipients
+// @desc    Get authorized escalation recipients according to TaskFlow hierarchy
+// @access  Private
+router.get('/escalation-recipients', protect, requireComplaintModule, async (req, res) => {
+  try {
+    const allUsers = await getAllUsers();
+    const recipients = getAuthorizedEscalationRecipients(req.user, allUsers);
+    const directManager = recipients.find((r) => r.isDirectManager) || null;
+    return res.json({
+      success: true,
+      recipients,
+      defaultRecipient: directManager || (recipients.length > 0 ? recipients[0] : null),
+    });
+  } catch (err) {
+    console.error('[Get Escalation Recipients Error]', err);
+    return res.status(500).json({ success: false, message: 'Failed to fetch escalation recipients' });
+  }
+});
+
+// @route   POST /api/complaints/test-email
+// @desc    Send a test email to verify SMTP connection
+// @access  Public / Private
+router.post('/test-email', async (req, res) => {
+  try {
+    const targetEmail = (req.body && req.body.to) ? req.body.to : 'sarfrajahamad068@gmail.com';
+    const { sendEmail } = require('../services/emailService');
+    const result = await sendEmail({
+      to: targetEmail,
+      subject: '✅ TaskFlow Pro – SMTP Test Email',
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 12px; background: #ffffff;">
+          <div style="background: linear-gradient(135deg, #2563eb, #1d4ed8); padding: 18px 20px; border-radius: 8px; color: #ffffff;">
+            <h2 style="margin: 0; font-size: 18px; font-weight: 700;">TaskFlow SMTP Configuration Verified!</h2>
+            <p style="margin: 4px 0 0; font-size: 13px; opacity: 0.9;">Google SMTP Integration Status: Active & Operational</p>
+          </div>
+          <div style="padding: 20px 0; color: #334155; font-size: 14px; line-height: 1.6;">
+            <p>Hello,</p>
+            <p>This email confirms that your Google SMTP credentials (<strong>sarfrajahamad068@gmail.com</strong>) are properly connected to TaskFlow.</p>
+            <div style="background: #f8fafc; border-left: 4px solid #2563eb; padding: 12px 16px; margin: 16px 0; border-radius: 4px;">
+              <p style="margin: 0; font-size: 13px; color: #475569;">
+                <strong>Host:</strong> smtp.gmail.com<br/>
+                <strong>Port:</strong> 465 (SSL/TLS)<br/>
+                <strong>Sender:</strong> sarfrajahamad068@gmail.com<br/>
+                <strong>Dispatched At:</strong> ${new Date().toLocaleString()}
+              </p>
+            </div>
+            <p>From now on, whenever a customer or team member logs a complaint ticket, both customer acknowledgment and manager notifications will be dispatched automatically.</p>
+          </div>
+        </div>
+      `,
+      text: 'TaskFlow SMTP Test: Your Google SMTP is configured and working successfully!',
+    });
+
+    if (result.success) {
+      return res.json({ success: true, message: `Test email sent successfully to ${targetEmail}!`, result });
+    } else {
+      return res.status(500).json({ success: false, message: result.error || 'Failed to send test email', result });
+    }
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// @route   GET /api/complaints/sla-policy
+// @desc    Get dynamic SLA policy targets per priority
+// @access  Private
+router.get('/sla-policy', protect, requireComplaintModule, (req, res) => {
+  try {
+    return res.json({
+      success: true,
+      policy: {
+        Critical: {
+          resolutionHours: 4,
+          firstResponseHours: 1,
+          label: '4 Hours Resolution / 1 Hour First Response',
+          description: 'P1 Critical SLA Policy: 4h Resolution, 1h First Response',
+        },
+        High: {
+          resolutionHours: 12,
+          firstResponseHours: 2,
+          label: '12 Hours Resolution / 2 Hours First Response',
+          description: 'P2 High SLA Policy: 12h Resolution, 2h First Response',
+        },
+        Medium: {
+          resolutionHours: 24,
+          firstResponseHours: 4,
+          label: '24 Hours Resolution / 4 Hours First Response',
+          description: 'P3 Medium SLA Policy: 24h Resolution, 4h First Response',
+        },
+        Low: {
+          resolutionHours: 48,
+          firstResponseHours: 8,
+          label: '48 Hours Resolution / 8 Hours First Response',
+          description: 'P4 Low SLA Policy: 48h Resolution, 8h First Response',
+        },
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to retrieve SLA policy', error: err.message });
+  }
+});
+
+// Helper: Department / Skill & Location Aware Smart Auto-Assignee Selector
+const matchDepartmentCategory = (category = '', department = '') => {
+  const cat = (category || '').toLowerCase().trim();
+  const dept = (department || '').toLowerCase().trim();
+  if (!cat || !dept) return false;
+
+  // Direct exact match
+  if (cat === dept) return true;
+
+  // Compare without parenthetical notes
+  const cleanCat = cat.replace(/\s*\([^)]*\)/g, '').trim();
+  const cleanDept = dept.replace(/\s*\([^)]*\)/g, '').trim();
+  if (cleanCat && cleanDept && (cleanCat === cleanDept || cleanCat.includes(cleanDept) || cleanDept.includes(cleanCat))) {
+    return true;
+  }
+
+  // 1. Technical & IT Support
+  if (cat.includes('technical') || cat.includes('it support') || cat.includes('backend') || cat.includes('system') || cat.includes('glitch') || cat.includes('crash') || cat.includes('freeze') || cat.includes('api') || cat.includes('database') || cat.includes('server') || cat.includes('hardware') || cat.includes('access') || cat.includes('2fa')) {
+    if (dept.includes('backend') || dept.includes('technical') || dept.includes('it support') || dept.includes('system') || dept.includes('engineer') || dept.includes('internet')) return true;
+  }
+  // 2. Customer Support & Helpdesk
+  if (cleanCat.includes('customer support') || cleanCat.includes('helpdesk') || cleanCat.includes('general support') || cleanCat.includes('support') || cleanCat.includes('help') || cleanCat.includes('service') || cleanCat.includes('inquiry') || cleanCat.includes('grievance') || cleanCat.includes('assistance')) {
+    if (cleanDept.includes('customer support') || cleanDept.includes('helpdesk') || cleanDept.includes('support') || cleanDept.includes('service') || cleanDept.includes('social media')) return true;
+  }
+  // 3. Sales & Business Development
+  if (cat.includes('sell') || cat.includes('sale') || cat.includes('pricing') || cat.includes('quote') || cat.includes('commercial') || cat.includes('lead') || cat.includes('deal') || cat.includes('contract')) {
+    if (dept.includes('sell') || dept.includes('sale') || dept.includes('business development') || dept.includes('commercial')) return true;
+  }
+  // 4. Accounts & Billing
+  if (cat.includes('bill') || cat.includes('payment') || cat.includes('invoice') || cat.includes('refund') || cat.includes('charge') || cat.includes('finance') || cat.includes('account') || cat.includes('tax') || cat.includes('gst')) {
+    if (dept.includes('account') || dept.includes('billing') || dept.includes('finance')) return true;
+  }
+  // 5. Operations & Field Logistics
+  if (cat.includes('operation') || cat.includes('logistic') || cat.includes('delivery') || cat.includes('shipment') || cat.includes('dispatch') || cat.includes('defect') || cat.includes('hardware') || cat.includes('damage') || cat.includes('product') || cat.includes('on-site')) {
+    if (dept.includes('operation') || dept.includes('logistic') || dept.includes('field') || dept.includes('dispatch') || dept.includes('quality')) return true;
+  }
+  // 6. Documentation & Quality
+  if (cat.includes('document') || cat.includes('quality') || cat.includes('compliance') || cat.includes('audit') || cat.includes('back office') || cat.includes('kyc') || cat.includes('sop')) {
+    if (dept.includes('document') || dept.includes('quality') || dept.includes('back office')) return true;
+  }
+  // 7. Social Media & Marketing
+  if (cat.includes('social') || cat.includes('marketing') || cat.includes('campaign') || cat.includes('brand') || cat.includes('pr')) {
+    if (dept.includes('social') || dept.includes('marketing')) return true;
+  }
+  // 8. Internet & Network Work
+  if (cat.includes('internet') || cat.includes('network') || cat.includes('wifi') || cat.includes('dns') || cat.includes('vpn') || cat.includes('bandwidth') || cat.includes('modem')) {
+    if (dept.includes('internet') || dept.includes('network')) return true;
+  }
+
+  return cat.includes(dept) || dept.includes(cat);
+};
+
+const matchLocationCity = (location = null, user = null) => {
+  if (!location || !user) return false;
+  const userCity = (user.city || user.location || user.address || '').toLowerCase().trim();
+  const compCity = (location.city || '').toLowerCase().trim();
+  const compState = (location.state || '').toLowerCase().trim();
+  const compAddress = (location.address || '').toLowerCase().trim();
+
+  if (!userCity) return false;
+  return (
+    (compCity && (userCity.includes(compCity) || compCity.includes(userCity))) ||
+    (compState && (userCity.includes(compState) || compState.includes(userCity))) ||
+    (compAddress && compAddress.includes(userCity))
+  );
+};
+
+const findAutoAssignee = (allUsers = [], complaints = [], category = '', location = null) => {
+  const activeStatuses = ['Logged', 'Open', 'In Progress', 'Assigned', 'Under Investigation'];
+
+  let candidates = allUsers.filter(
+    (u) =>
+      u.status === 'Approved' &&
+      u.role !== 'Super Admin'
+  );
+
+  if (candidates.length === 0) return null;
+
+  const loads = candidates.map((cand) => {
+    const cid = cand._id ? cand._id.toString() : cand.id?.toString();
+    const count = complaints.filter(
+      (c) =>
+        activeStatuses.includes(c.status) &&
+        ((c.assignedTo && c.assignedTo.toString() === cid) ||
+          (c.assignedToName && cand.name && c.assignedToName.toLowerCase().trim() === cand.name.toLowerCase().trim()))
+    ).length;
+
+    const skillMatched = matchDepartmentCategory(category, cand.department);
+    const locationMatched = matchLocationCity(location, cand);
+
+    // Check if candidate is currently out on a field service / active visit
+    const inProgressTicket = complaints.find(
+      (c) =>
+        (c.status === 'In Progress' || c.status === 'Under Investigation') &&
+        ((c.assignedTo && c.assignedTo.toString() === cid) ||
+          (c.assignedToName && cand.name && c.assignedToName.toLowerCase().trim() === cand.name.toLowerCase().trim()))
+    );
+
+    let score = 0;
+    if (skillMatched) score += 20;
+    if (locationMatched) score += 15;
+    if (!inProgressTicket && count === 0) {
+      score += 10; // Free and ready immediately
+    } else if (inProgressTicket) {
+      score -= 5; // Currently engaged on customer site
+    }
+    score -= count * 2;
+
+    return { user: cand, count, score, inProgressTicket };
+  });
+
+  loads.sort((a, b) => b.score - a.score || a.count - b.count);
+  return loads[0].user;
+};
+
+// @route   POST /api/complaints/public
+// @desc    Public endpoint for external customers to raise complaints without credentials
+// @access  Public
+router.post('/public', requireComplaintModule, async (req, res) => {
+  try {
+    const {
+      customerName,
+      organization = '',
+      customerEmail = '',
+      customerPhone = '',
+      subject,
+      description,
+      category = 'Technical Glitch',
+      subCategory = 'General',
+      priority = 'Medium',
+      productOrService = 'CRM Platform',
+      location = null,
+      attachments = [],
+    } = req.body;
+
+    const trimmedSubject = (subject || '').trim();
+    const trimmedDesc = (description || '').trim();
+    const trimmedName = (customerName || '').trim();
+    const trimmedOrg = (organization || 'Direct Customer').trim();
+    const trimmedEmail = (customerEmail || '').trim().toLowerCase();
+    const trimmedPhone = (customerPhone || '').trim();
+
+    if (!trimmedName) {
+      return res.status(400).json({ success: false, message: 'Please enter your Full Name.' });
+    }
+    if (!trimmedEmail) {
+      return res.status(400).json({ success: false, message: 'Please enter a valid Email Address.' });
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(trimmedEmail)) {
+      return res.status(400).json({ success: false, message: 'Please enter a valid Email Address.' });
+    }
+    const digits = trimmedPhone.replace(/\D/g, '');
+    if (!digits || digits.length < 7 || digits.length > 15) {
+      return res.status(400).json({ success: false, message: 'Please enter a valid Contact Phone (7-15 digits).' });
+    }
+    if (!trimmedSubject) {
+      return res.status(400).json({ success: false, message: 'Complaint Subject is required.' });
+    }
+    if (!trimmedDesc) {
+      return res.status(400).json({ success: false, message: 'Detailed Description of the issue is required.' });
+    }
+
+    const allUsers = await getAllUsers();
+    let currentComplaints = [];
+    if (fallbackStore.isFallback) {
+      currentComplaints = fallbackStore.complaints || [];
+    } else {
+      try {
+        currentComplaints = await Complaint.find({ status: { $in: ['Logged', 'Open', 'In Progress', 'Assigned', 'Under Investigation'] } }).lean();
+      } catch (_) {
+        currentComplaints = fallbackStore.complaints || [];
+      }
+    }
+
+    // 10/10 Hybrid Geolocation resolution
+    const resolvedLocation = await resolveComplaintLocation(location, req);
+
+    // Smart Auto-Assignment (Skill & Department Matching + Location Proximity + Workload Balancing)
+    const autoAgent = findAutoAssignee(allUsers, currentComplaints, category, resolvedLocation);
+    const finalAssignedTo = autoAgent ? (autoAgent._id || autoAgent.id) : null;
+    const finalAssignedToName = autoAgent ? autoAgent.name : 'Customer Support Team';
+    const finalTeam = autoAgent?.department || 'Customer Support';
+
+    // Compute SLA Deadlines
+    const { slaHours: finalSlaHours, slaDeadline, firstResponseDeadline } = computeSlaDeadline(priority);
+
+    // Generate dynamic unique ticket number (CMP-YYYY-XXXXX)
+    const ticketNumber = await generateDynamicTicketNumber();
+
+    const cleanAttachments = Array.isArray(attachments)
+      ? attachments.slice(0, 5).map((att) => ({
+          name: (att.name || 'attachment').toString().slice(0, 100),
+          size: Number(att.size) || 0,
+          type: (att.type || 'application/octet-stream').toString().slice(0, 50),
+          dataUrl: typeof att.dataUrl === 'string' ? att.dataUrl : '',
+          uploadedAt: new Date(),
+        }))
+      : [];
+
+    let newComplaint;
+    if (fallbackStore.isFallback) {
+      newComplaint = {
+        _id: 'cmp_' + Date.now(),
+        ticketNumber,
+        complaintId: ticketNumber,
+        customerId: null,
+        customerName: trimmedName,
+        customerEmail: trimmedEmail,
+        customerPhone: trimmedPhone,
+        organization: trimmedOrg,
+        account: trimmedOrg,
+        subject: trimmedSubject,
+        description: trimmedDesc,
+        category,
+        subCategory,
+        complaintType: 'Complaint',
+        productOrService,
+        source: 'Web Portal (Customer Self-Service)',
+        priority,
+        severity: 'Moderate',
+        status: 'Logged',
+        slaHours: finalSlaHours,
+        slaDeadline: slaDeadline.toISOString(),
+        firstResponseDeadline: firstResponseDeadline.toISOString(),
+        firstResponseAt: null,
+        firstResponseSlaStatus: 'Pending',
+        slaStatus: 'On Track',
+        isPaused: false,
+        pausedAt: null,
+        totalPausedTimeMs: 0,
+        assignedTo: finalAssignedTo,
+        assignedToName: finalAssignedToName,
+        team: finalTeam,
+        createdBy: null,
+        createdByName: 'Customer (Self-Service Portal)',
+        location: resolvedLocation,
+        attachments: cleanAttachments,
+        activities: [
+          {
+            activityId: 'act_' + Date.now(),
+            type: 'Note',
+            author: '',
+            authorName: 'Customer Portal',
+            date: new Date().toISOString().slice(0, 10),
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            subject: 'Complaint Raised Online via Public Support Portal',
+            content: `Ticket self-registered by customer ${trimmedName} (${trimmedEmail}). Assigned to ${finalAssignedToName}.`,
+            timestamp: new Date().toISOString(),
+          },
+        ],
+        assignmentHistory: [
+          {
+            fromUser: 'Customer Self-Service',
+            fromUserName: 'Customer Portal',
+            toUser: finalAssignedTo ? finalAssignedTo.toString() : '',
+            toUserName: finalAssignedToName,
+            assignedBy: 'System Auto-Router',
+            assignedByName: 'System Auto-Router',
+            reason: 'Automated round-robin support assignment',
+            timestamp: new Date().toISOString(),
+          },
+        ],
+        auditHistory: [
+          {
+            action: 'CREATE_PUBLIC',
+            performedBy: 'PublicPortal',
+            performedByName: trimmedName,
+            role: 'Customer',
+            delta: `Public complaint logged: ${ticketNumber}`,
+            timestamp: new Date().toISOString(),
+          },
+        ],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      if (!fallbackStore.complaints) fallbackStore.complaints = [];
+      fallbackStore.complaints.unshift(newComplaint);
+      fallbackStore.saveToFile();
+    } else {
+      newComplaint = await Complaint.create({
+        ticketNumber,
+        complaintId: ticketNumber,
+        customerId: null,
+        customerName: trimmedName,
+        customerEmail: trimmedEmail,
+        customerPhone: trimmedPhone,
+        organization: trimmedOrg,
+        account: trimmedOrg,
+        subject: trimmedSubject,
+        description: trimmedDesc,
+        category,
+        subCategory,
+        complaintType: 'Complaint',
+        productOrService,
+        source: 'Web Portal (Customer Self-Service)',
+        priority,
+        severity: 'Moderate',
+        status: 'Logged',
+        slaHours: finalSlaHours,
+        slaDeadline,
+        firstResponseDeadline,
+        assignedTo: finalAssignedTo,
+        assignedToName: finalAssignedToName,
+        team: finalTeam,
+        createdBy: null,
+        createdByName: 'Customer (Self-Service Portal)',
+        location: resolvedLocation,
+        attachments: cleanAttachments,
+        activities: [
+          {
+            activityId: 'act_' + Date.now(),
+            type: 'Note',
+            author: '',
+            authorName: 'Customer Portal',
+            date: new Date().toISOString().slice(0, 10),
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            subject: 'Complaint Raised Online via Public Support Portal',
+            content: `Ticket self-registered by customer ${trimmedName} (${trimmedEmail}). Assigned to ${finalAssignedToName}.`,
+            timestamp: new Date(),
+          },
+        ],
+      });
+      newComplaint = newComplaint.toObject ? newComplaint.toObject() : newComplaint;
+    }
+
+    // Real-Time Notification & WebSocket instance
+    const io = req.app ? req.app.get('io') : null;
+
+    // Email Notification Dispatch (Customer acknowledgment + Manager alert)
+    let emailStatus = {
+      customer: { status: 'Failed', recipient: trimmedEmail, error: 'Email service error' },
+      manager: { status: 'Failed', recipient: '', error: 'Email service error' },
+    };
+
+    try {
+      emailStatus = await sendComplaintNotifications({
+        complaint: newComplaint,
+        creator: { name: 'Customer (Public Portal)', email: trimmedEmail },
+        allUsers,
+        io,
+      });
+    } catch (notifErr) {
+      console.error('[Public Portal Email Dispatch Error]', notifErr);
+      emailStatus = {
+        customer: { status: 'Failed', recipient: trimmedEmail, error: notifErr.message },
+        manager: { status: 'Failed', recipient: '', error: notifErr.message },
+      };
+    }
+
+    const emailActivities = [
+      {
+        activityId: 'act_' + (Date.now() + 1),
+        type: 'Customer Communication',
+        author: '',
+        authorName: 'System',
+        date: new Date().toISOString().slice(0, 10),
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        subject: `Customer Confirmation Email: ${emailStatus.customer.status}`,
+        content:
+          emailStatus.customer.status === 'Sent Successfully'
+            ? `Confirmation email delivered to ${trimmedEmail}.`
+            : `Customer email delivery failed: ${emailStatus.customer.error || 'Unknown error'}.`,
+        timestamp: new Date().toISOString(),
+      },
+      {
+        activityId: 'act_' + (Date.now() + 2),
+        type: 'Email',
+        author: '',
+        authorName: 'System',
+        date: new Date().toISOString().slice(0, 10),
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        subject: `Manager/Admin Notification Email: ${emailStatus.manager.status}`,
+        content:
+          emailStatus.manager.status === 'Sent Successfully'
+            ? `Notification delivered to ${emailStatus.manager.recipientName || 'assigned manager'} (${emailStatus.manager.recipient}).`
+            : `Manager email delivery failed: ${emailStatus.manager.error || 'Unknown error'}.`,
+        timestamp: new Date().toISOString(),
+      },
+    ];
+
+    if (fallbackStore.isFallback) {
+      const idx = fallbackStore.complaints.findIndex((c) => c._id === newComplaint._id);
+      if (idx >= 0) {
+        fallbackStore.complaints[idx].emailNotifications = emailStatus;
+        if (!fallbackStore.complaints[idx].activities) fallbackStore.complaints[idx].activities = [];
+        fallbackStore.complaints[idx].activities.push(...emailActivities);
+        fallbackStore.saveToFile();
+        newComplaint = fallbackStore.complaints[idx];
+      }
+    } else {
+      await Complaint.findByIdAndUpdate(newComplaint._id, {
+        $set: { emailNotifications: emailStatus },
+        $push: { activities: { $each: emailActivities } },
+      });
+      newComplaint.emailNotifications = emailStatus;
+    }
+
+    // Real-Time Notification & WebSocket Dispatch to the assigned agent
+    if (finalAssignedToName && finalAssignedToName !== 'Unassigned') {
+      await createComplaintAssignmentNotification({
+        complaint: newComplaint,
+        assignedTo: finalAssignedTo,
+        assignedToName: finalAssignedToName,
+        assignedBy: { name: 'Customer (Public Portal)', avatar: '' },
+        allUsers,
+        io,
+        isReassignment: false,
+      });
+    }
+
+    if (io) {
+      io.emit('complaint_created', newComplaint);
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: `Your complaint has been successfully registered! Ticket Number: ${ticketNumber}`,
+      ticketNumber,
+      status: 'Logged',
+      assignedToName: finalAssignedToName,
+      createdAt: newComplaint.createdAt,
+    });
+  } catch (err) {
+    console.error('[Public Complaint Submission Error]:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to submit complaint. Please check your network and try again.',
+      error: err.message,
+    });
+  }
+});
+
+// @route   GET /api/complaints/public/track/:ticketNumber
+// @desc    Public endpoint to view ticket progress without leaking private notes/audit trails
+// @access  Public
+router.get('/public/track/:ticketNumber', requireComplaintModule, async (req, res) => {
+  try {
+    const rawNum = (req.params.ticketNumber || '').trim();
+    if (!rawNum) {
+      return res.status(400).json({ success: false, message: 'Ticket Number is required.' });
+    }
+
+    let found = null;
+    if (fallbackStore.isFallback) {
+      found = (fallbackStore.complaints || []).find(
+        (c) =>
+          c.ticketNumber &&
+          c.ticketNumber.toLowerCase().trim() === rawNum.toLowerCase().trim()
+      );
+    } else {
+      found = await Complaint.findOne({
+        ticketNumber: new RegExp(`^${escapeRegex(rawNum)}$`, 'i'),
+      }).lean();
+    }
+
+    if (!found) {
+      return res.status(404).json({
+        success: false,
+        message: `No complaint ticket found with number "${rawNum}". Please check and try again.`,
+      });
+    }
+
+    return res.json({
+      success: true,
+      ticket: {
+        ticketNumber: found.ticketNumber,
+        customerName: found.customerName,
+        organization: found.organization,
+        subject: found.subject,
+        description: found.description,
+        category: found.category,
+        subCategory: found.subCategory,
+        priority: found.priority,
+        status: found.status,
+        slaStatus: found.slaStatus,
+        assignedToName: found.assignedToName || 'Customer Support Team',
+        team: found.team || 'Support',
+        createdAt: found.createdAt,
+        resolvedAt: found.resolvedAt || null,
+        resolutionSummary: found.resolutionSummary || '',
+        closureReason: found.closureReason || '',
+        attachmentsCount: (found.attachments || []).length,
+      },
+    });
+  } catch (err) {
+    console.error('[Public Ticket Tracking Error]:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to look up ticket status.',
+      error: err.message,
+    });
+  }
+});
+
 // @route   GET /api/complaints/:id
 // @desc    Get single complaint details
 // @access  Private
@@ -1810,14 +2764,17 @@ router.get('/:id', protect, requireComplaintModule, async (req, res) => {
 });
 
 // @route   POST /api/complaints
-// @desc    Create a new complaint ticket
+// @desc    Create a new complaint ticket with dynamic ticket number and email notifications
 // @access  Private
 router.post('/', protect, requireComplaintModule, async (req, res) => {
   try {
     const {
+      customerId = null,
       customerName,
       customerEmail = '',
       customerPhone = '',
+      phone = '',
+      mobileNumber = '',
       organization = '',
       account = '',
       subject,
@@ -1840,40 +2797,175 @@ router.post('/', protect, requireComplaintModule, async (req, res) => {
       linkedCustomer = '',
       linkedOpportunity = '',
       linkedProject = '',
+      location = null,
+      attachments = [],
     } = req.body;
 
     const complaintSubject = (subject || title || '').trim();
 
-    if (!customerName || !complaintSubject || !description) {
+    if (!complaintSubject || !description) {
       return res.status(400).json({
         success: false,
-        message: 'Customer name, subject, and description are required.',
+        message: 'Complaint subject and description are required.',
       });
+    }
+
+    const allUsers = await getAllUsers();
+    const scope = getUserScopeContext(req.user, allUsers);
+
+    // 1. Customer Information: Support manual entry of all 4 fields (with graceful fallback for customerId)
+    let finalCustomerName = (customerName || '').trim();
+    let finalOrganization = (organization || account || '').trim();
+    let finalCustomerEmail = (customerEmail || '').trim().toLowerCase();
+    let finalCustomerPhone = (customerPhone || phone || mobileNumber || '').trim();
+    const finalCustomerId = customerId ? customerId.toString().trim() : null;
+
+    // Graceful fallback for API calls providing customerId
+    if (finalCustomerId) {
+      let allLeads = [];
+      if (fallbackStore.isFallback) {
+        allLeads = fallbackStore.leads || [];
+      } else {
+        try {
+          allLeads = await Lead.find({}).lean();
+        } catch (_) {
+          allLeads = fallbackStore.leads || [];
+        }
+      }
+      const matched = allLeads.find(
+        (l) =>
+          (l._id && l._id.toString() === finalCustomerId) ||
+          (l.customerId && l.customerId.toString() === finalCustomerId) ||
+          (l.lead_id && l.lead_id.toString() === finalCustomerId) ||
+          (l.leadId && l.leadId.toString() === finalCustomerId)
+      );
+      if (matched) {
+        if (!scope.isSuperAdmin && !isCustomerAccessibleForUser(req.user, matched, allUsers)) {
+          return res.status(403).json({
+            success: false,
+            message: 'Access denied: You do not have permission to file complaints for customers outside your hierarchy.',
+          });
+        }
+        if (!finalCustomerName) finalCustomerName = (matched.name || matched.contactPerson || matched.customerName || '').trim();
+        if (!finalOrganization) finalOrganization = (matched.company || matched.organization || matched.account || '').trim();
+        if (!finalCustomerEmail) finalCustomerEmail = (matched.email || matched.customerEmail || '').trim().toLowerCase();
+        if (!finalCustomerPhone) finalCustomerPhone = (matched.phone || matched.mobileNumber || matched.customerPhone || '').trim();
+      }
+    }
+
+    if (!finalCustomerName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Customer Name is required.',
+      });
+    }
+
+    if (!finalOrganization) {
+      return res.status(400).json({
+        success: false,
+        message: 'Organization Name is required.',
+      });
+    }
+
+    if (!finalCustomerEmail) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email Address is required.',
+      });
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(finalCustomerEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please enter a valid email address.',
+      });
+    }
+
+    const finalCustomerPhoneDigits = finalCustomerPhone.replace(/\D/g, '');
+    if (!finalCustomerPhone) {
+      return res.status(400).json({
+        success: false,
+        message: 'Contact Number is required.',
+      });
+    }
+    if (finalCustomerPhoneDigits.length < 7 || finalCustomerPhoneDigits.length > 15) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please enter a valid contact number (7-15 digits).',
+      });
+    }
+
+    if (req.body && req.body.nextFollowUpDate) {
+      const todayStr = new Date().toISOString().split('T')[0];
+      const selectedDateStr = new Date(req.body.nextFollowUpDate).toISOString().split('T')[0];
+      if (selectedDateStr < todayStr) {
+        return res.status(400).json({
+          success: false,
+          message: 'Next Follow-Up Date cannot be in the past. Please select today or a future date.',
+        });
+      }
     }
 
     const { slaHours: finalSlaHours, slaDeadline, firstResponseDeadline } = computeSlaDeadline(priority, slaHours);
 
+    // Derive assignee details and automatic team/department
+    let finalAssignedTo = assignedTo || null;
+    let finalAssignedToName = assignedToName || 'Unassigned';
+    let finalTeam = team || 'Technical Support';
+
+    if (finalAssignedTo) {
+      const assignedUserObj = allUsers.find(
+        (u) => u._id && u._id.toString() === finalAssignedTo.toString()
+      );
+      if (assignedUserObj) {
+        if (!finalAssignedToName || finalAssignedToName === 'Unassigned') {
+          finalAssignedToName = assignedUserObj.name || finalAssignedToName;
+        }
+        if (assignedUserObj.department) {
+          finalTeam = assignedUserObj.department;
+        }
+      }
+    }
+
+    // 10/10 Hybrid Submitter Location Resolution (GPS with Silent IP Fallback)
+    const resolvedLocation = await resolveComplaintLocation(location, req);
+
+    const cleanAttachments = Array.isArray(attachments)
+      ? attachments.slice(0, 5).map((att) => ({
+          name: (att.name || 'attachment').toString().slice(0, 100),
+          size: Number(att.size) || 0,
+          type: (att.type || 'application/octet-stream').toString().slice(0, 50),
+          dataUrl: typeof att.dataUrl === 'string' ? att.dataUrl : '',
+          uploadedAt: new Date(),
+        }))
+      : [];
+
+    // 2. Generate dynamic unique ticket number (CMP-YYYY-XXXXX)
+    const ticketNumber = await generateDynamicTicketNumber();
+
     let newComplaint;
     if (fallbackStore.isFallback) {
-      const ticketNumber = generateTicketNumber(fallbackStore.complaints || []);
       newComplaint = {
         _id: 'cmp_' + Date.now(),
         ticketNumber,
         complaintId: ticketNumber,
-        customerName: customerName.trim(),
-        customerEmail: customerEmail.trim(),
-        customerPhone: customerPhone.trim(),
-        organization: (organization || account || '').trim(),
-        account: (account || organization || '').trim(),
+        location: resolvedLocation,
+        attachments: cleanAttachments,
+        customerId: finalCustomerId,
+        customerName: finalCustomerName,
+        customerEmail: finalCustomerEmail,
+        customerPhone: finalCustomerPhone,
+        organization: finalOrganization,
+        account: finalOrganization,
         subject: complaintSubject,
         description: description.trim(),
         category,
         subCategory,
-        complaintType,
-        productOrService,
-        source,
+        complaintType: complaintType || 'Complaint',
+        productOrService: productOrService || 'CRM Platform',
+        source: source || 'Web Portal',
         priority,
-        severity,
+        severity: severity || 'Moderate',
         status: 'Logged',
         slaHours: finalSlaHours,
         slaDeadline: slaDeadline.toISOString(),
@@ -1884,9 +2976,9 @@ router.post('/', protect, requireComplaintModule, async (req, res) => {
         isPaused: false,
         pausedAt: null,
         totalPausedTimeMs: 0,
-        assignedTo: assignedTo || null,
-        assignedToName: assignedToName || 'Unassigned',
-        team,
+        assignedTo: finalAssignedTo,
+        assignedToName: finalAssignedToName,
+        team: finalTeam,
         createdBy: req.user._id ? req.user._id.toString() : null,
         createdByName: req.user.name || '',
         nextFollowUpDate: nextFollowUpDate ? new Date(nextFollowUpDate).toISOString() : null,
@@ -1912,10 +3004,14 @@ router.post('/', protect, requireComplaintModule, async (req, res) => {
         isDuplicate: false,
         parentComplaintId: '',
         linkedComplaints: [],
-        linkedCustomer,
+        linkedCustomer: finalCustomerId,
         linkedOpportunity,
         linkedProject,
         knowledgeBaseArticle: { articleId: '', title: '', url: '', helpful: true },
+        emailNotifications: {
+          customer: { recipient: finalCustomerEmail, status: 'Pending', sentAt: null, error: '' },
+          manager: { recipient: '', status: 'Pending', sentAt: null, error: '' },
+        },
         activities: [
           {
             activityId: 'act_' + Date.now(),
@@ -1963,70 +3059,163 @@ router.post('/', protect, requireComplaintModule, async (req, res) => {
       fallbackStore.complaints.unshift(newComplaint);
       fallbackStore.saveToFile();
     } else {
-      const allCount = await Complaint.countDocuments();
-      const ticketNumber = `CMP-${(allCount + 1).toString().padStart(4, '0')}`;
+      let createdDoc = null;
+      let attemptTicket = ticketNumber;
+      let retries = 0;
 
-      newComplaint = await Complaint.create({
-        ticketNumber,
-        complaintId: ticketNumber,
-        customerName: customerName.trim(),
-        customerEmail: customerEmail.trim(),
-        customerPhone: customerPhone.trim(),
-        organization: (organization || account || '').trim(),
-        account: (account || organization || '').trim(),
-        subject: complaintSubject,
-        description: description.trim(),
-        category,
-        subCategory,
-        complaintType,
-        productOrService,
-        source,
-        priority,
-        severity,
-        status: 'Logged',
-        slaHours: finalSlaHours,
-        slaDeadline,
-        firstResponseDeadline,
-        assignedTo: assignedTo || null,
-        assignedToName: assignedToName || 'Unassigned',
-        team,
-        createdBy: req.user._id,
-        createdByName: req.user.name || '',
-        nextFollowUpDate: nextFollowUpDate ? new Date(nextFollowUpDate) : null,
-        nextFollowUpTime,
-        nextFollowUpPurpose,
-        linkedCustomer,
-        linkedOpportunity,
-        linkedProject,
-        activities: [
-          {
-            activityId: 'act_' + Date.now(),
-            type: 'Note',
-            author: req.user._id.toString(),
-            authorName: req.user.name || '',
-            date: new Date().toISOString().slice(0, 10),
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            subject: 'Complaint Ticket Created',
-            content: `Ticket logged by ${req.user.name} with ${priority} priority (${finalSlaHours}h SLA).`,
-            timestamp: new Date(),
-          },
-        ],
-        assignmentHistory: assignedToName !== 'Unassigned'
-          ? [
+      while (!createdDoc && retries < 5) {
+        try {
+          createdDoc = await Complaint.create({
+            ticketNumber: attemptTicket,
+            complaintId: attemptTicket,
+            location: resolvedLocation,
+            attachments: cleanAttachments,
+            customerId: finalCustomerId,
+            customerName: finalCustomerName,
+            customerEmail: finalCustomerEmail,
+            customerPhone: finalCustomerPhone,
+            organization: finalOrganization,
+            account: finalOrganization,
+            subject: complaintSubject,
+            description: description.trim(),
+            category,
+            subCategory,
+            complaintType: complaintType || 'Complaint',
+            productOrService: productOrService || 'CRM Platform',
+            source: source || 'Web Portal',
+            priority,
+            severity: severity || 'Moderate',
+            status: 'Logged',
+            slaHours: finalSlaHours,
+            slaDeadline,
+            firstResponseDeadline,
+            assignedTo: finalAssignedTo,
+            assignedToName: finalAssignedToName,
+            team: finalTeam,
+            createdBy: req.user._id,
+            createdByName: req.user.name || '',
+            nextFollowUpDate: nextFollowUpDate ? new Date(nextFollowUpDate) : null,
+            nextFollowUpTime,
+            nextFollowUpPurpose,
+            linkedCustomer: finalCustomerId,
+            linkedOpportunity,
+            linkedProject,
+            emailNotifications: {
+              customer: { recipient: finalCustomerEmail, status: 'Pending', sentAt: null, error: '' },
+              manager: { recipient: '', status: 'Pending', sentAt: null, error: '' },
+            },
+            activities: [
               {
-                fromUser: 'Unassigned',
-                fromUserName: 'Unassigned',
-                toUser: assignedTo ? assignedTo.toString() : '',
-                toUserName: assignedToName,
-                assignedBy: req.user._id.toString(),
-                assignedByName: req.user.name || '',
-                reason: 'Initial assignment upon ticket creation',
+                activityId: 'act_' + Date.now(),
+                type: 'Note',
+                author: req.user._id.toString(),
+                authorName: req.user.name || '',
+                date: new Date().toISOString().slice(0, 10),
+                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                subject: 'Complaint Ticket Created',
+                content: `Ticket logged by ${req.user.name} with ${priority} priority (${finalSlaHours}h SLA).`,
                 timestamp: new Date(),
               },
-            ]
-          : [],
+            ],
+            assignmentHistory: assignedToName !== 'Unassigned'
+              ? [
+                  {
+                    fromUser: 'Unassigned',
+                    fromUserName: 'Unassigned',
+                    toUser: assignedTo ? assignedTo.toString() : '',
+                    toUserName: assignedToName,
+                    assignedBy: req.user._id.toString(),
+                    assignedByName: req.user.name || '',
+                    reason: 'Initial assignment upon ticket creation',
+                    timestamp: new Date(),
+                  },
+                ]
+              : [],
+          });
+        } catch (collisionErr) {
+          if (collisionErr.code === 11000 && collisionErr.keyPattern?.ticketNumber) {
+            retries++;
+            attemptTicket = await generateDynamicTicketNumber();
+          } else {
+            throw collisionErr;
+          }
+        }
+      }
+
+      newComplaint = createdDoc.toObject();
+    }
+
+    // Real-Time Notification & WebSocket instance
+    const io = req.app ? req.app.get('io') : null;
+
+    // 3. Initiate Automatic Email Notifications Independently AFTER successful database save
+    let emailStatus = {
+      customer: { status: 'Failed', recipient: finalCustomerEmail, error: 'Email service error' },
+      manager: { status: 'Failed', recipient: '', error: 'Email service error' },
+    };
+
+    try {
+      emailStatus = await sendComplaintNotifications({
+        complaint: newComplaint,
+        creator: req.user,
+        allUsers,
+        io,
       });
-      newComplaint = newComplaint.toObject();
+    } catch (notifErr) {
+      console.error('[Notification Dispatch Error]', notifErr);
+      emailStatus = {
+        customer: { status: 'Failed', recipient: finalCustomerEmail, error: notifErr.message },
+        manager: { status: 'Failed', recipient: '', error: notifErr.message },
+      };
+    }
+
+    // 4. Record actual delivery statuses on the complaint record
+    const emailActivities = [
+      {
+        activityId: 'act_' + (Date.now() + 1),
+        type: 'Customer Communication',
+        author: req.user._id ? req.user._id.toString() : '',
+        authorName: req.user.name || 'System',
+        date: new Date().toISOString().slice(0, 10),
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        subject: `Customer Confirmation Email: ${emailStatus.customer.status}`,
+        content:
+          emailStatus.customer.status === 'Sent Successfully'
+            ? `Confirmation email delivered to ${finalCustomerEmail}.`
+            : `Customer email delivery failed: ${emailStatus.customer.error || 'Unknown error'}.`,
+        timestamp: new Date().toISOString(),
+      },
+      {
+        activityId: 'act_' + (Date.now() + 2),
+        type: 'Email',
+        author: req.user._id ? req.user._id.toString() : '',
+        authorName: req.user.name || 'System',
+        date: new Date().toISOString().slice(0, 10),
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        subject: `Manager/Admin Notification Email: ${emailStatus.manager.status}`,
+        content:
+          emailStatus.manager.status === 'Sent Successfully'
+            ? `Notification delivered to ${emailStatus.manager.recipientName || 'assigned manager'} (${emailStatus.manager.recipient}).`
+            : `Manager email delivery failed: ${emailStatus.manager.error || 'Unknown error'}.`,
+        timestamp: new Date().toISOString(),
+      },
+    ];
+
+    if (fallbackStore.isFallback) {
+      const idx = fallbackStore.complaints.findIndex((c) => c._id === newComplaint._id);
+      if (idx >= 0) {
+        fallbackStore.complaints[idx].emailNotifications = emailStatus;
+        if (!fallbackStore.complaints[idx].activities) fallbackStore.complaints[idx].activities = [];
+        fallbackStore.complaints[idx].activities.push(...emailActivities);
+        fallbackStore.saveToFile();
+        newComplaint = fallbackStore.complaints[idx];
+      }
+    } else {
+      await Complaint.findByIdAndUpdate(newComplaint._id, {
+        $set: { emailNotifications: emailStatus },
+        $push: { activities: { $each: emailActivities } },
+      });
+      newComplaint.emailNotifications = emailStatus;
     }
 
     // Audit Logging
@@ -2041,21 +3230,31 @@ router.post('/', protect, requireComplaintModule, async (req, res) => {
     });
 
     // Realtime notification & socket emission
-    const io = req.app.get('io');
+    if (finalAssignedToName && finalAssignedToName !== 'Unassigned') {
+      await createComplaintAssignmentNotification({
+        complaint: newComplaint,
+        assignedTo: finalAssignedTo,
+        assignedToName: finalAssignedToName,
+        assignedBy: req.user,
+        allUsers,
+        io,
+        isReassignment: false,
+      });
+    }
+
     if (io) {
       io.emit('complaint_created', newComplaint);
-      io.emit('notification', {
-        type: 'complaint_created',
-        title: `New Ticket Logged: ${newComplaint.ticketNumber}`,
-        message: `${newComplaint.customerName}: ${newComplaint.subject} (${newComplaint.priority} priority)`,
-        timestamp: new Date(),
-      });
     }
 
     return res.status(201).json({
       success: true,
-      message: 'Complaint ticket logged successfully',
+      message: 'Complaint Raised Successfully!',
       complaint: newComplaint,
+      ticketNumber: newComplaint.ticketNumber,
+      emailStatus: {
+        customer: emailStatus.customer,
+        manager: emailStatus.manager,
+      },
     });
   } catch (err) {
     console.error('[Create Complaint Error]', err);
@@ -2103,6 +3302,17 @@ router.put('/:id', protect, requireComplaintModule, async (req, res) => {
     let updatedComplaint;
     let priorComplaint;
 
+    if (req.body && req.body.nextFollowUpDate) {
+      const todayStr = new Date().toISOString().split('T')[0];
+      const selectedDateStr = new Date(req.body.nextFollowUpDate).toISOString().split('T')[0];
+      if (selectedDateStr < todayStr) {
+        return res.status(400).json({
+          success: false,
+          message: 'Next Follow-Up Date cannot be in the past. Please select today or a future date.',
+        });
+      }
+    }
+
     if (fallbackStore.isFallback) {
       const index = (fallbackStore.complaints || []).findIndex((c) => c._id.toString() === req.params.id);
       if (index === -1) {
@@ -2116,6 +3326,13 @@ router.put('/:id', protect, requireComplaintModule, async (req, res) => {
         return res.status(403).json({
           success: false,
           message: 'Access denied: You can only edit complaints assigned to you or your subordinates.',
+        });
+      }
+
+      if (['Resolved', 'Closed'].includes(existing.status)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Resolved and closed complaints cannot be edited. Users can only view ticket details.',
         });
       }
 
@@ -2211,6 +3428,13 @@ router.put('/:id', protect, requireComplaintModule, async (req, res) => {
         });
       }
 
+      if (['Resolved', 'Closed'].includes(complaint.status)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Resolved and closed complaints cannot be edited. Users can only view ticket details.',
+        });
+      }
+
       if (subject !== undefined) complaint.subject = subject;
       if (description !== undefined) complaint.description = description;
       if (category !== undefined) complaint.category = category;
@@ -2283,6 +3507,23 @@ router.put('/:id', protect, requireComplaintModule, async (req, res) => {
     });
 
     const io = req.app.get('io');
+    if (
+      assignedToName &&
+      assignedToName !== 'Unassigned' &&
+      priorComplaint &&
+      assignedToName !== priorComplaint.assignedToName
+    ) {
+      await createComplaintAssignmentNotification({
+        complaint: updatedComplaint,
+        assignedTo: updatedComplaint.assignedTo,
+        assignedToName: updatedComplaint.assignedToName,
+        assignedBy: req.user,
+        allUsers,
+        io,
+        isReassignment: true,
+      });
+    }
+
     if (io) {
       io.emit('complaint_updated', updatedComplaint);
     }
@@ -2322,6 +3563,13 @@ router.put('/:id/assign', protect, requireComplaintModule, async (req, res) => {
         return res.status(403).json({
           success: false,
           message: 'Access denied: You can only assign complaints within your authorized hierarchy.',
+        });
+      }
+
+      if (['Resolved', 'Closed'].includes(existing.status)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Resolved and closed complaints cannot be reassigned. Users can only view ticket details.',
         });
       }
 
@@ -2377,6 +3625,13 @@ router.put('/:id/assign', protect, requireComplaintModule, async (req, res) => {
         });
       }
 
+      if (['Resolved', 'Closed'].includes(complaint.status)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Resolved and closed complaints cannot be reassigned. Users can only view ticket details.',
+        });
+      }
+
       complaint.assignmentHistory.unshift({
         fromUser: complaint.assignedTo ? complaint.assignedTo.toString() : '',
         fromUserName: complaint.assignedToName || 'Unassigned',
@@ -2422,20 +3677,63 @@ router.put('/:id/assign', protect, requireComplaintModule, async (req, res) => {
     });
 
     const io = req.app.get('io');
+    let emailStatus = null;
+    if (assignedToName && assignedToName !== 'Unassigned') {
+      const notifResult = await createComplaintAssignmentNotification({
+        complaint: updatedComplaint,
+        assignedTo,
+        assignedToName,
+        assignedBy: req.user,
+        allUsers,
+        io,
+        isReassignment: true,
+        reason,
+      });
+      emailStatus = notifResult?.emailStatus || null;
+    }
+
+    if (emailStatus && emailStatus.status && emailStatus.status !== 'Skipped') {
+      const emailActivity = {
+        activityId: 'act_' + Date.now() + '_em',
+        type: 'Customer Communication',
+        author: req.user._id ? req.user._id.toString() : '',
+        authorName: 'System',
+        date: new Date().toISOString().slice(0, 10),
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        subject: `Assignment Notification Email: ${emailStatus.status}`,
+        content:
+          emailStatus.status === 'Sent Successfully'
+            ? `Assignment email delivered to ${emailStatus.recipient}.`
+            : `Assignment email to ${emailStatus.recipient || assignedToName}: ${emailStatus.status} (${emailStatus.error || 'N/A'}).`,
+        timestamp: new Date().toISOString(),
+      };
+
+      if (fallbackStore.isFallback) {
+        const cIdx = (fallbackStore.complaints || []).findIndex((c) => c._id.toString() === req.params.id);
+        if (cIdx !== -1) {
+          fallbackStore.complaints[cIdx].activities = [emailActivity, ...(fallbackStore.complaints[cIdx].activities || [])];
+          fallbackStore.saveToFile();
+          updatedComplaint = fallbackStore.complaints[cIdx];
+        }
+      } else {
+        await Complaint.findByIdAndUpdate(req.params.id, {
+          $push: { activities: { $each: [emailActivity], $position: 0 } },
+        });
+        if (updatedComplaint.activities) {
+          updatedComplaint.activities.unshift(emailActivity);
+        }
+      }
+    }
+
     if (io) {
       io.emit('complaint_updated', updatedComplaint);
-      io.emit('notification', {
-        type: 'complaint_assigned',
-        title: `Ticket Assigned: ${updatedComplaint.ticketNumber}`,
-        message: `Assigned to ${assignedToName} (${updatedComplaint.customerName}: ${updatedComplaint.subject})`,
-        timestamp: new Date(),
-      });
     }
 
     return res.json({
       success: true,
-      message: `Complaint reassigned to ${assignedToName}`,
+      message: `Complaint reassigned to ${assignedToName}${emailStatus?.status === 'Sent Successfully' ? ' (Email Notification Delivered)' : ''}`,
       complaint: updatedComplaint,
+      emailStatus,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to assign complaint', error: err.message });
@@ -2447,11 +3745,45 @@ router.put('/:id/assign', protect, requireComplaintModule, async (req, res) => {
 // @access  Private
 router.put('/:id/escalate', protect, requireComplaintModule, async (req, res) => {
   try {
-    const { escalationReason = 'Critical issue requires immediate attention', escalatedTo = '' } = req.body;
+    const {
+      escalationReason = '',
+      escalatedTo = '',
+      escalatedToId = '',
+    } = req.body;
+
+    // 1. Mandatory Validation
+    if (!escalationReason || !escalationReason.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Escalation Reason / Justification is mandatory. Please explain why escalation is required.',
+      });
+    }
+
+    if (!escalatedTo && !escalatedToId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Escalate To recipient is mandatory. Please select an authorized higher authority.',
+      });
+    }
 
     let allUsers = await getAllUsers();
     let updatedComplaint;
 
+    // 2. Strict Hierarchy Permission Validation
+    const authorizedRecipients = getAuthorizedEscalationRecipients(req.user, allUsers);
+    const targetRecipient = authorizedRecipients.find((r) =>
+      (escalatedToId && r._id.toString() === escalatedToId.toString()) ||
+      (escalatedTo && r.name.toLowerCase().trim() === escalatedTo.toLowerCase().trim())
+    );
+
+    if (!targetRecipient) {
+      return res.status(403).json({
+        success: false,
+        message: 'Hierarchy Permission Denied: Selected recipient is not an authorized higher authority for your role and reporting structure.',
+      });
+    }
+
+    // 3. FallbackStore vs MongoDB
     if (fallbackStore.isFallback) {
       const index = (fallbackStore.complaints || []).findIndex((c) => c._id.toString() === req.params.id);
       if (index === -1) {
@@ -2460,18 +3792,43 @@ router.put('/:id/escalate', protect, requireComplaintModule, async (req, res) =>
 
       const existing = fallbackStore.complaints[index];
       if (!canUserAccessComplaint(req.user, existing, allUsers)) {
-        return res.status(403).json({ success: false, message: 'Access denied' });
+        return res.status(403).json({ success: false, message: 'Access denied to this complaint' });
+      }
+
+      if (['Resolved', 'Closed'].includes(existing.status)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Resolved and closed complaints cannot be escalated. Users can only view ticket details.',
+        });
+      }
+
+      // Prevent duplicate escalation submissions to the same authority
+      if (existing.isEscalated && existing.status === 'Escalated' && existing.escalatedToId?.toString() === targetRecipient._id.toString()) {
+        return res.status(400).json({
+          success: false,
+          message: `This ticket has already been escalated to ${targetRecipient.name}.`,
+        });
       }
 
       const activityEntry = {
-        activityId: 'act_' + Date.now(),
+        activityId: 'act_' + Date.now() + '_' + Math.random().toString(16).substring(2, 6),
         type: 'Escalation',
         author: req.user._id ? req.user._id.toString() : '',
         authorName: req.user.name || '',
         date: new Date().toISOString().slice(0, 10),
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        subject: 'Ticket Escalated',
-        content: `Escalated by ${req.user.name}. Reason: ${escalationReason}`,
+        subject: `Ticket Escalated to ${targetRecipient.name} (${targetRecipient.role})`,
+        content: `Escalated by ${req.user.name} (${req.user.role || 'User'}) to ${targetRecipient.name} (${targetRecipient.role}). Reason: ${escalationReason.trim()}`,
+        outcome: `Escalated to ${targetRecipient.name}`,
+        timestamp: new Date().toISOString(),
+      };
+
+      const auditEntry = {
+        action: 'ESCALATED',
+        performedBy: req.user._id ? req.user._id.toString() : '',
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Escalated ticket to ${targetRecipient.name} (${targetRecipient.role}). Reason: ${escalationReason.trim()}`,
         timestamp: new Date().toISOString(),
       };
 
@@ -2479,10 +3836,19 @@ router.put('/:id/escalate', protect, requireComplaintModule, async (req, res) =>
         ...existing,
         status: 'Escalated',
         isEscalated: true,
-        escalationReason,
-        escalatedTo: escalatedTo || 'Management Desk',
+        escalationReason: escalationReason.trim(),
+        escalatedTo: targetRecipient.name,
+        escalatedToId: targetRecipient._id,
+        escalatedToName: targetRecipient.name,
+        escalatedToRole: targetRecipient.role,
+        escalationReviewer: targetRecipient.name,
+        escalationReviewerId: targetRecipient._id,
+        escalatedBy: req.user._id ? req.user._id.toString() : '',
+        escalatedByName: req.user.name || '',
+        escalatedByRole: req.user.role || 'User',
         escalatedAt: new Date().toISOString(),
         activities: [activityEntry, ...(existing.activities || [])],
+        auditHistory: [auditEntry, ...(existing.auditHistory || [])],
         updatedAt: new Date().toISOString(),
       };
 
@@ -2495,24 +3861,57 @@ router.put('/:id/escalate', protect, requireComplaintModule, async (req, res) =>
       if (!complaint) return res.status(404).json({ success: false, message: 'Complaint not found' });
 
       if (!canUserAccessComplaint(req.user, complaint.toObject(), allUsers)) {
-        return res.status(403).json({ success: false, message: 'Access denied' });
+        return res.status(403).json({ success: false, message: 'Access denied to this complaint' });
+      }
+
+      if (['Resolved', 'Closed'].includes(complaint.status)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Resolved and closed complaints cannot be escalated. Users can only view ticket details.',
+        });
+      }
+
+      // Prevent duplicate escalation submissions to the same authority
+      if (complaint.isEscalated && complaint.status === 'Escalated' && complaint.escalatedToId?.toString() === targetRecipient._id.toString()) {
+        return res.status(400).json({
+          success: false,
+          message: `This ticket has already been escalated to ${targetRecipient.name}.`,
+        });
       }
 
       complaint.status = 'Escalated';
       complaint.isEscalated = true;
-      complaint.escalationReason = escalationReason;
-      complaint.escalatedTo = escalatedTo || 'Management Desk';
+      complaint.escalationReason = escalationReason.trim();
+      complaint.escalatedTo = targetRecipient.name;
+      complaint.escalatedToId = targetRecipient._id;
+      complaint.escalatedToName = targetRecipient.name;
+      complaint.escalatedToRole = targetRecipient.role;
+      complaint.escalationReviewer = targetRecipient.name;
+      complaint.escalationReviewerId = targetRecipient._id;
+      complaint.escalatedBy = req.user._id;
+      complaint.escalatedByName = req.user.name || '';
+      complaint.escalatedByRole = req.user.role || 'User';
       complaint.escalatedAt = new Date();
 
       complaint.activities.unshift({
-        activityId: 'act_' + Date.now(),
+        activityId: 'act_' + Date.now() + '_' + Math.random().toString(16).substring(2, 6),
         type: 'Escalation',
         author: req.user._id.toString(),
         authorName: req.user.name || '',
         date: new Date().toISOString().slice(0, 10),
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        subject: 'Ticket Escalated',
-        content: `Escalated by ${req.user.name}. Reason: ${escalationReason}`,
+        subject: `Ticket Escalated to ${targetRecipient.name} (${targetRecipient.role})`,
+        content: `Escalated by ${req.user.name} (${req.user.role || 'User'}) to ${targetRecipient.name} (${targetRecipient.role}). Reason: ${escalationReason.trim()}`,
+        outcome: `Escalated to ${targetRecipient.name}`,
+        timestamp: new Date(),
+      });
+
+      complaint.auditHistory.unshift({
+        action: 'ESCALATED',
+        performedBy: req.user._id.toString(),
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Escalated ticket to ${targetRecipient.name} (${targetRecipient.role}). Reason: ${escalationReason.trim()}`,
         timestamp: new Date(),
       });
 
@@ -2521,36 +3920,140 @@ router.put('/:id/escalate', protect, requireComplaintModule, async (req, res) =>
       updatedComplaint.slaStatus = getComputedSlaStatus(updatedComplaint);
     }
 
+    // 4. Audit Log Action
     await logAuditAction({
       entity_type: 'Complaint',
       entity_id: updatedComplaint._id || updatedComplaint.ticketNumber,
       action: 'ESCALATE',
       operator: req.user,
-      delta: `Escalated ticket ${updatedComplaint.ticketNumber}: ${escalationReason}`,
+      delta: `Escalated ticket ${updatedComplaint.ticketNumber} to ${targetRecipient.name} (${targetRecipient.role}): ${escalationReason.trim()}`,
       req,
     });
 
-    const io = req.app.get('io');
-    if (io) {
-      io.emit('complaint_updated', updatedComplaint);
-      io.emit('notification', {
-        type: 'complaint_escalated',
-        title: `🚨 Escalation Alert: ${updatedComplaint.ticketNumber}`,
-        message: `${updatedComplaint.customerName}: ${escalationReason}`,
-        timestamp: new Date(),
-      });
+    // 5. In-App Notification Record for Exact Immediate Reporting Manager ONLY
+    try {
+      const targetRecipientId = targetRecipient._id ? targetRecipient._id.toString() : targetRecipient.id?.toString() || '';
+      const targetRecipientName = targetRecipient.name || 'Manager';
+      const targetUsername = (targetRecipient.username || '').toLowerCase().trim();
+
+      // Duplicate prevention: check if identical escalation notification was sent in the last 20 seconds
+      let isDuplicateNotif = false;
+      const recentWindow = new Date(Date.now() - 20000);
+
+      if (fallbackStore.isFallback) {
+        if (!fallbackStore.notifications) fallbackStore.notifications = [];
+        isDuplicateNotif = fallbackStore.notifications.some(
+          (n) =>
+            n.type === 'complaint_escalated' &&
+            n.complaintId?.toString() === updatedComplaint._id.toString() &&
+            n.recipientUser?.toString() === targetRecipientId &&
+            new Date(n.createdAt) > recentWindow
+        );
+      } else {
+        const recentNotif = await Notification.findOne({
+          type: 'complaint_escalated',
+          complaintId: updatedComplaint._id,
+          recipientUser: targetRecipient._id,
+          createdAt: { $gt: recentWindow },
+        });
+        if (recentNotif) isDuplicateNotif = true;
+      }
+
+      if (!isDuplicateNotif) {
+        const notifId = 'notif_' + Date.now() + '_' + Math.random().toString(16).substring(2, 8);
+        const notifData = {
+          _id: notifId,
+          user: req.user._id,
+          userName: req.user.name || 'Staff',
+          recipientUser: targetRecipientId,
+          recipientName: targetRecipientName,
+          complaintId: updatedComplaint._id,
+          complaintTicketNumber: updatedComplaint.ticketNumber,
+          ticketNumber: updatedComplaint.ticketNumber,
+          customerName: updatedComplaint.customerName || '',
+          priority: updatedComplaint.priority || 'Medium',
+          escalatedBy: req.user.name || 'Staff',
+          escalatedById: req.user._id,
+          escalationReason: escalationReason.trim(),
+          escalatedAt: new Date(),
+          type: 'complaint_escalated',
+          title: 'Complaint Escalated',
+          message: `${req.user.name} has escalated complaint ${updatedComplaint.ticketNumber} to you for review.\nPriority: ${updatedComplaint.priority || 'Medium'}\nReason: ${escalationReason.trim()}`,
+          taskDescription: `Review escalated complaint ${updatedComplaint.ticketNumber} (${updatedComplaint.customerName})`,
+          taskType: 'complaint',
+          forRole: 'DirectRecipientOnly', // Crucial security: Never match generic role queries
+          isRead: false,
+          createdAt: new Date(),
+        };
+
+        let savedNotification = { ...notifData };
+
+        if (fallbackStore.isFallback) {
+          if (!fallbackStore.notifications) fallbackStore.notifications = [];
+          fallbackStore.notifications.unshift(savedNotification);
+          fallbackStore.saveToFile();
+        } else {
+          try {
+            const mongoPayload = { ...notifData };
+            delete mongoPayload._id;
+            const created = await Notification.create(mongoPayload);
+            savedNotification = created.toObject ? created.toObject() : created;
+          } catch (dbErr) {
+            console.warn('[Notification DB Write Warning on Escalate]:', dbErr.message);
+          }
+          if (!fallbackStore.notifications) fallbackStore.notifications = [];
+          fallbackStore.notifications.unshift(savedNotification);
+          fallbackStore.saveToFile();
+        }
+
+        // 6. Targeted Real-time WebSocket Delivery to Immediate Manager ONLY
+        const io = req.app.get('io');
+        if (io) {
+          // General complaint state broadcast for queue / table status updates
+          io.emit('complaint_updated', updatedComplaint);
+
+          // Dedicated notification delivered ONLY to the authorized recipient's personal socket rooms
+          const socketPayload = {
+            ...savedNotification,
+            _id: savedNotification._id || notifId,
+            timestamp: savedNotification.createdAt,
+          };
+
+          const targetName = (targetRecipientName || '').toLowerCase().trim();
+
+          if (targetRecipientId) {
+            io.to(`user:${targetRecipientId}`).emit('notification:new', socketPayload);
+            io.to(`user:${targetRecipientId}`).emit('notification', socketPayload);
+            io.to(`user:${targetRecipientId}`).emit('notification:updated');
+          }
+          if (targetName) {
+            io.to(`user:${targetName}`).emit('notification:new', socketPayload);
+            io.to(`user:${targetName}`).emit('notification', socketPayload);
+            io.to(`user:${targetName}`).emit('notification:updated');
+          }
+          if (targetUsername && targetUsername !== targetName) {
+            io.to(`user:${targetUsername}`).emit('notification:new', socketPayload);
+            io.to(`user:${targetUsername}`).emit('notification', socketPayload);
+            io.to(`user:${targetUsername}`).emit('notification:updated');
+          }
+        }
+      }
+    } catch (notifErr) {
+      console.warn('[Notification Creation Warning on Escalate]:', notifErr.message);
     }
 
     return res.json({
       success: true,
-      message: 'Complaint escalated successfully',
+      message: `Complaint escalated to ${targetRecipient.name} successfully`,
       complaint: updatedComplaint,
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to escalate complaint' });
+    console.error('[Escalate Complaint Error]', err);
+    res.status(500).json({ success: false, message: 'Failed to escalate complaint: ' + err.message });
   }
 });
 
+// @route   POST /api/complaints/:id/activities
 // @route   POST /api/complaints/:id/activities
 // @desc    Add activity log or schedule follow-up on a complaint
 // @access  Private
@@ -2564,24 +4067,47 @@ router.post('/:id/activities', protect, requireComplaintModule, async (req, res)
       nextAction = '',
       nextFollowUpDate = '',
       nextFollowUpTime = '',
+      isInternal = false,
+      followUpStatus = 'Pending',
+      assignedEmployee = '',
+      assignedEmployeeId = null,
     } = req.body;
 
     let allUsers = await getAllUsers();
     let updatedComplaint;
 
+    // Strict validation: Next Follow-Up Date cannot be in the past
+    if (nextFollowUpDate) {
+      const todayStr = new Date().toISOString().split('T')[0];
+      const selectedDateStr = new Date(nextFollowUpDate).toISOString().split('T')[0];
+      if (selectedDateStr < todayStr) {
+        return res.status(400).json({
+          success: false,
+          message: 'Next Follow-Up Date cannot be in the past. Please select today or a future date.',
+        });
+      }
+    }
+
+    const isFollowUpType = type === 'Follow-up' || Boolean(nextFollowUpDate);
+    const initialFollowUpStatus = isFollowUpType ? (followUpStatus || 'Pending') : 'N/A';
+
     const activityEntry = {
-      activityId: 'act_' + Date.now(),
+      activityId: 'act_' + Date.now() + '_' + Math.random().toString(16).substring(2, 6),
       type,
       author: req.user._id ? req.user._id.toString() : '',
       authorName: req.user.name || '',
-      date: new Date().toISOString().slice(0, 10),
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      date: req.body.date || new Date().toISOString().slice(0, 10),
+      time: req.body.time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       subject: subject || `${type} Logged`,
       content,
       outcome,
       nextAction,
       nextFollowUpDate,
       nextFollowUpTime,
+      isInternal: Boolean(isInternal),
+      followUpStatus: initialFollowUpStatus,
+      assignedEmployee: assignedEmployee || '',
+      assignedEmployeeId: assignedEmployeeId || null,
       timestamp: new Date().toISOString(),
     };
 
@@ -2594,12 +4120,34 @@ router.post('/:id/activities', protect, requireComplaintModule, async (req, res)
         return res.status(403).json({ success: false, message: 'Access denied' });
       }
 
+      // Duplicate prevention: identical content & author within 5 seconds
+      const lastAct = (existing.activities || [])[0];
+      if (lastAct && lastAct.content === content && lastAct.author === (req.user._id ? req.user._id.toString() : '')) {
+        const timeDiff = Math.abs(new Date().getTime() - new Date(lastAct.timestamp).getTime());
+        if (timeDiff < 5000) {
+          return res.status(409).json({ success: false, message: 'Duplicate activity detected. Please wait a moment.' });
+        }
+      }
+
+      const auditEntry = {
+        action: Boolean(isInternal) ? 'INTERNAL_NOTE_ADDED' : type === 'Follow-up' ? 'FOLLOWUP_SCHEDULED' : 'ACTIVITY_LOGGED',
+        performedBy: req.user._id ? req.user._id.toString() : '',
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Logged ${type}: ${subject || content.slice(0, 60)}`,
+        timestamp: new Date().toISOString(),
+      };
+
       const updated = {
         ...existing,
         activities: [activityEntry, ...(existing.activities || [])],
+        auditHistory: [auditEntry, ...(existing.auditHistory || [])],
         nextFollowUpDate: nextFollowUpDate ? new Date(nextFollowUpDate).toISOString() : existing.nextFollowUpDate,
         nextFollowUpTime: nextFollowUpTime || existing.nextFollowUpTime,
-        nextFollowUpPurpose: nextAction || existing.nextFollowUpPurpose,
+        nextFollowUpPurpose: nextAction || (type === 'Follow-up' ? content : existing.nextFollowUpPurpose),
+        nextFollowUpAssignedTo: assignedEmployee || existing.nextFollowUpAssignedTo,
+        nextFollowUpAssignedToId: assignedEmployeeId || existing.nextFollowUpAssignedToId,
+        nextFollowUpStatus: isFollowUpType ? 'Pending' : existing.nextFollowUpStatus,
         updatedAt: new Date().toISOString(),
       };
       updated.slaStatus = getComputedSlaStatus(updated);
@@ -2614,6 +4162,15 @@ router.post('/:id/activities', protect, requireComplaintModule, async (req, res)
         return res.status(403).json({ success: false, message: 'Access denied' });
       }
 
+      // Duplicate prevention: identical content & author within 5 seconds
+      const lastAct = (complaint.activities || [])[0];
+      if (lastAct && lastAct.content === content && lastAct.author === (req.user._id ? req.user._id.toString() : '')) {
+        const timeDiff = Math.abs(new Date().getTime() - new Date(lastAct.timestamp).getTime());
+        if (timeDiff < 5000) {
+          return res.status(409).json({ success: false, message: 'Duplicate activity detected. Please wait a moment.' });
+        }
+      }
+
       complaint.activities.unshift({
         ...activityEntry,
         timestamp: new Date(),
@@ -2622,6 +4179,19 @@ router.post('/:id/activities', protect, requireComplaintModule, async (req, res)
       if (nextFollowUpDate) complaint.nextFollowUpDate = new Date(nextFollowUpDate);
       if (nextFollowUpTime) complaint.nextFollowUpTime = nextFollowUpTime;
       if (nextAction) complaint.nextFollowUpPurpose = nextAction;
+      if (type === 'Follow-up' && content) complaint.nextFollowUpPurpose = content;
+      if (assignedEmployee) complaint.nextFollowUpAssignedTo = assignedEmployee;
+      if (assignedEmployeeId) complaint.nextFollowUpAssignedToId = assignedEmployeeId;
+      if (isFollowUpType) complaint.nextFollowUpStatus = 'Pending';
+
+      complaint.auditHistory.unshift({
+        action: Boolean(isInternal) ? 'INTERNAL_NOTE_ADDED' : type === 'Follow-up' ? 'FOLLOWUP_SCHEDULED' : 'ACTIVITY_LOGGED',
+        performedBy: req.user._id ? req.user._id.toString() : '',
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Logged ${type}: ${subject || content.slice(0, 60)}`,
+        timestamp: new Date(),
+      });
 
       await complaint.save();
       updatedComplaint = complaint.toObject();
@@ -2649,17 +4219,16 @@ router.post('/:id/activities', protect, requireComplaintModule, async (req, res)
       complaint: updatedComplaint,
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to record activity' });
+    res.status(500).json({ success: false, message: 'Failed to record activity: ' + err.message });
   }
 });
 
-// @route   PUT /api/complaints/:id/investigate
-// @desc    Update Investigation, RCA, and CAPA
+// @route   PUT /api/complaints/:id/activities/:activityId/followup
+// @desc    Update follow-up status (e.g. mark Completed or Pending)
 // @access  Private
-router.put('/:id/investigate', protect, requireComplaintModule, async (req, res) => {
+router.put('/:id/activities/:activityId/followup', protect, requireComplaintModule, async (req, res) => {
   try {
-    const { investigationNotes = '', rootCause = '', correctiveAction = '', preventiveAction = '' } = req.body;
-
+    const { status = 'Completed', completionNotes = '' } = req.body;
     let allUsers = await getAllUsers();
     let updatedComplaint;
 
@@ -2672,13 +4241,154 @@ router.put('/:id/investigate', protect, requireComplaintModule, async (req, res)
         return res.status(403).json({ success: false, message: 'Access denied' });
       }
 
+      let actFound = false;
+      const activities = (existing.activities || []).map((a) => {
+        if (a.activityId === req.params.activityId) {
+          actFound = true;
+          return {
+            ...a,
+            followUpStatus: status,
+            completedAt: status === 'Completed' ? new Date().toISOString() : null,
+            completedBy: status === 'Completed' ? req.user.name : '',
+            outcome: completionNotes || a.outcome,
+          };
+        }
+        return a;
+      });
+
+      if (!actFound) return res.status(404).json({ success: false, message: 'Follow-up activity not found' });
+
+      const auditEntry = {
+        action: 'FOLLOWUP_STATUS_UPDATED',
+        performedBy: req.user._id ? req.user._id.toString() : '',
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Marked follow-up as ${status}`,
+        timestamp: new Date().toISOString(),
+      };
+
+      const updated = {
+        ...existing,
+        activities,
+        nextFollowUpStatus: status,
+        auditHistory: [auditEntry, ...(existing.auditHistory || [])],
+        updatedAt: new Date().toISOString(),
+      };
+      updated.slaStatus = getComputedSlaStatus(updated);
+      fallbackStore.complaints[index] = updated;
+      fallbackStore.saveToFile();
+      updatedComplaint = updated;
+    } else {
+      const complaint = await Complaint.findById(req.params.id);
+      if (!complaint) return res.status(404).json({ success: false, message: 'Complaint not found' });
+
+      if (!canUserAccessComplaint(req.user, complaint.toObject(), allUsers)) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
+      }
+
+      const act = complaint.activities.find((a) => a.activityId === req.params.activityId);
+      if (!act) return res.status(404).json({ success: false, message: 'Follow-up activity not found' });
+
+      act.followUpStatus = status;
+      act.completedAt = status === 'Completed' ? new Date() : null;
+      act.completedBy = status === 'Completed' ? req.user.name : '';
+      if (completionNotes) act.outcome = completionNotes;
+
+      complaint.nextFollowUpStatus = status;
+      complaint.auditHistory.unshift({
+        action: 'FOLLOWUP_STATUS_UPDATED',
+        performedBy: req.user._id.toString(),
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Marked follow-up as ${status}`,
+        timestamp: new Date(),
+      });
+
+      await complaint.save();
+      updatedComplaint = complaint.toObject();
+      updatedComplaint.slaStatus = getComputedSlaStatus(updatedComplaint);
+    }
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('complaint_updated', updatedComplaint);
+    }
+
+    return res.json({
+      success: true,
+      message: `Follow-up marked as ${status}`,
+      complaint: updatedComplaint,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to update follow-up status: ' + err.message });
+  }
+});
+
+// @route   PUT /api/complaints/:id/investigate
+// @desc    Update Investigation, RCA, and CAPA
+// @access  Private
+router.put('/:id/investigate', protect, requireComplaintModule, async (req, res) => {
+  try {
+    const {
+      investigationNotes = '',
+      rootCause = '',
+      correctiveAction = '',
+      preventiveAction = '',
+      capaActionOwner = '',
+      capaActionOwnerId = null,
+      capaTargetDate = null,
+      capaVerificationNotes = '',
+      capaVerificationStatus = 'Pending',
+      fiveWhys = [],
+    } = req.body;
+
+    let allUsers = await getAllUsers();
+    let updatedComplaint;
+
+    // Strict validation: CAPA Target Date cannot be in the past
+    if (capaTargetDate) {
+      const todayStr = new Date().toISOString().split('T')[0];
+      const targetDateStr = new Date(capaTargetDate).toISOString().split('T')[0];
+      if (targetDateStr < todayStr) {
+        return res.status(400).json({
+          success: false,
+          message: 'CAPA Target Completion Date cannot be in the past. Please select today or a future date.',
+        });
+      }
+    }
+
+    if (fallbackStore.isFallback) {
+      const index = (fallbackStore.complaints || []).findIndex((c) => c._id.toString() === req.params.id);
+      if (index === -1) return res.status(404).json({ success: false, message: 'Complaint not found' });
+
+      const existing = fallbackStore.complaints[index];
+      if (!canUserAccessComplaint(req.user, existing, allUsers)) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
+      }
+
+      const auditEntry = {
+        action: 'INVESTIGATION_CAPA_UPDATED',
+        performedBy: req.user._id ? req.user._id.toString() : '',
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Updated RCA & CAPA (Verification Status: ${capaVerificationStatus || 'Pending'})`,
+        timestamp: new Date().toISOString(),
+      };
+
       const updated = {
         ...existing,
         investigationNotes,
         rootCause,
         correctiveAction,
         preventiveAction,
+        capaActionOwner: capaActionOwner || existing.capaActionOwner,
+        capaActionOwnerId: capaActionOwnerId || existing.capaActionOwnerId,
+        capaTargetDate: capaTargetDate ? new Date(capaTargetDate).toISOString() : existing.capaTargetDate,
+        capaVerificationNotes: capaVerificationNotes || existing.capaVerificationNotes,
+        capaVerificationStatus: capaVerificationStatus || existing.capaVerificationStatus || 'Pending',
+        fiveWhys: Array.isArray(fiveWhys) ? fiveWhys : (existing.fiveWhys || []),
         status: existing.status === 'Logged' ? 'Under Investigation' : existing.status,
+        auditHistory: [auditEntry, ...(existing.auditHistory || [])],
         updatedAt: new Date().toISOString(),
       };
 
@@ -2698,7 +4408,22 @@ router.put('/:id/investigate', protect, requireComplaintModule, async (req, res)
       complaint.rootCause = rootCause;
       complaint.correctiveAction = correctiveAction;
       complaint.preventiveAction = preventiveAction;
+      if (capaActionOwner) complaint.capaActionOwner = capaActionOwner;
+      if (capaActionOwnerId) complaint.capaActionOwnerId = capaActionOwnerId;
+      if (capaTargetDate) complaint.capaTargetDate = new Date(capaTargetDate);
+      complaint.capaVerificationNotes = capaVerificationNotes;
+      complaint.capaVerificationStatus = capaVerificationStatus || 'Pending';
+      if (Array.isArray(fiveWhys)) complaint.fiveWhys = fiveWhys;
       if (complaint.status === 'Logged') complaint.status = 'Under Investigation';
+
+      complaint.auditHistory.unshift({
+        action: 'INVESTIGATION_CAPA_UPDATED',
+        performedBy: req.user._id.toString(),
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Updated RCA & CAPA (Verification Status: ${capaVerificationStatus || 'Pending'})`,
+        timestamp: new Date(),
+      });
 
       await complaint.save();
       updatedComplaint = complaint.toObject();
@@ -2721,11 +4446,11 @@ router.put('/:id/investigate', protect, requireComplaintModule, async (req, res)
 
     return res.json({
       success: true,
-      message: 'Investigation details updated',
+      message: 'Investigation and CAPA details updated successfully',
       complaint: updatedComplaint,
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to update investigation' });
+    res.status(500).json({ success: false, message: 'Failed to update investigation: ' + err.message });
   }
 });
 
@@ -2741,9 +4466,17 @@ router.put('/:id/resolve', protect, requireComplaintModule, async (req, res) => 
       rootCause = '',
       correctiveAction = '',
       preventiveAction = '',
-      csatRating = 5,
+      csatRating = null,
       csatFeedback = '',
     } = req.body;
+
+    // Strict validation: Resolution summary or notes is required
+    if (!resolutionSummary && !resolutionNotes) {
+      return res.status(400).json({
+        success: false,
+        message: 'Resolution Summary or Notes are required to resolve the ticket.',
+      });
+    }
 
     let allUsers = await getAllUsers();
     let updatedComplaint;
@@ -2775,19 +4508,33 @@ router.put('/:id/resolve', protect, requireComplaintModule, async (req, res) => 
         timestamp: new Date().toISOString(),
       };
 
+      const auditEntry = {
+        action: 'RESOLVED',
+        performedBy: req.user._id ? req.user._id.toString() : '',
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Resolved ticket (${resolutionCode}). Summary: ${resolutionSummary || resolutionNotes}`,
+        timestamp: new Date().toISOString(),
+      };
+
       const updated = {
         ...existing,
         status: 'Resolved',
         resolutionNotes: resolutionNotes || resolutionSummary,
         resolutionSummary: resolutionSummary || resolutionNotes,
         resolutionCode,
+        resolvedBy: req.user._id ? req.user._id.toString() : '',
+        resolvedByName: req.user.name || '',
         rootCause: rootCause || existing.rootCause,
         correctiveAction: correctiveAction || existing.correctiveAction,
         preventiveAction: preventiveAction || existing.preventiveAction,
-        csatRating: Number(csatRating) || 5,
-        csatFeedback,
+        csatRating: csatRating ? Number(csatRating) : existing.csatRating,
+        csatFeedback: csatFeedback || existing.csatFeedback,
+        csatFeedbackDate: csatRating ? resolvedAt : existing.csatFeedbackDate,
+        csatStatus: csatRating ? 'Received' : (existing.csatStatus || 'Pending'),
         resolvedAt,
         activities: [activityEntry, ...(existing.activities || [])],
+        auditHistory: [auditEntry, ...(existing.auditHistory || [])],
         updatedAt: new Date().toISOString(),
       };
       updated.slaStatus = getComputedSlaStatus(updated);
@@ -2811,12 +4558,20 @@ router.put('/:id/resolve', protect, requireComplaintModule, async (req, res) => 
       complaint.resolutionNotes = resolutionNotes || resolutionSummary;
       complaint.resolutionSummary = resolutionSummary || resolutionNotes;
       complaint.resolutionCode = resolutionCode;
+      complaint.resolvedBy = req.user._id.toString();
+      complaint.resolvedByName = req.user.name || '';
+      complaint.resolvedAt = new Date();
+
       if (rootCause) complaint.rootCause = rootCause;
       if (correctiveAction) complaint.correctiveAction = correctiveAction;
       if (preventiveAction) complaint.preventiveAction = preventiveAction;
-      complaint.csatRating = Number(csatRating) || 5;
-      complaint.csatFeedback = csatFeedback;
-      complaint.resolvedAt = new Date();
+
+      if (csatRating) {
+        complaint.csatRating = Number(csatRating);
+        complaint.csatFeedback = csatFeedback;
+        complaint.csatFeedbackDate = new Date();
+        complaint.csatStatus = 'Received';
+      }
 
       complaint.activities.unshift({
         activityId: 'act_' + Date.now(),
@@ -2827,6 +4582,15 @@ router.put('/:id/resolve', protect, requireComplaintModule, async (req, res) => 
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         subject: 'Complaint Marked as Resolved',
         content: `Resolved by ${req.user.name}. Code: ${resolutionCode}. Notes: ${resolutionNotes || resolutionSummary}`,
+        timestamp: new Date(),
+      });
+
+      complaint.auditHistory.unshift({
+        action: 'RESOLVED',
+        performedBy: req.user._id.toString(),
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Resolved ticket (${resolutionCode}). Summary: ${resolutionSummary || resolutionNotes}`,
         timestamp: new Date(),
       });
 
@@ -2861,7 +4625,95 @@ router.put('/:id/resolve', protect, requireComplaintModule, async (req, res) => 
       complaint: updatedComplaint,
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to resolve complaint' });
+    res.status(500).json({ success: false, message: 'Failed to resolve complaint: ' + err.message });
+  }
+});
+
+// @route   PUT /api/complaints/:id/csat
+// @desc    Submit or update Customer Satisfaction (CSAT) rating and feedback
+// @access  Private
+router.put('/:id/csat', protect, requireComplaintModule, async (req, res) => {
+  try {
+    const { csatRating, csatFeedback = '' } = req.body;
+    const ratingNum = Number(csatRating);
+    if (!ratingNum || ratingNum < 1 || ratingNum > 5) {
+      return res.status(400).json({ success: false, message: 'CSAT rating must be a number between 1 and 5' });
+    }
+
+    let allUsers = await getAllUsers();
+    let updatedComplaint;
+    const feedbackDate = new Date().toISOString();
+
+    if (fallbackStore.isFallback) {
+      const index = (fallbackStore.complaints || []).findIndex((c) => c._id.toString() === req.params.id);
+      if (index === -1) return res.status(404).json({ success: false, message: 'Complaint not found' });
+
+      const existing = fallbackStore.complaints[index];
+      if (!canUserAccessComplaint(req.user, existing, allUsers)) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
+      }
+
+      const auditEntry = {
+        action: 'CSAT_RECORDED',
+        performedBy: req.user._id ? req.user._id.toString() : '',
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Customer rated ${ratingNum}/5 stars: ${csatFeedback || 'No comment'}`,
+        timestamp: feedbackDate,
+      };
+
+      const updated = {
+        ...existing,
+        csatRating: ratingNum,
+        csatFeedback,
+        csatFeedbackDate: feedbackDate,
+        csatStatus: 'Received',
+        auditHistory: [auditEntry, ...(existing.auditHistory || [])],
+        updatedAt: feedbackDate,
+      };
+      updated.slaStatus = getComputedSlaStatus(updated);
+      fallbackStore.complaints[index] = updated;
+      fallbackStore.saveToFile();
+      updatedComplaint = updated;
+    } else {
+      const complaint = await Complaint.findById(req.params.id);
+      if (!complaint) return res.status(404).json({ success: false, message: 'Complaint not found' });
+
+      if (!canUserAccessComplaint(req.user, complaint.toObject(), allUsers)) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
+      }
+
+      complaint.csatRating = ratingNum;
+      complaint.csatFeedback = csatFeedback;
+      complaint.csatFeedbackDate = new Date();
+      complaint.csatStatus = 'Received';
+
+      complaint.auditHistory.unshift({
+        action: 'CSAT_RECORDED',
+        performedBy: req.user._id.toString(),
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Customer rated ${ratingNum}/5 stars: ${csatFeedback || 'No comment'}`,
+        timestamp: new Date(),
+      });
+
+      await complaint.save();
+      updatedComplaint = complaint.toObject();
+      updatedComplaint.slaStatus = getComputedSlaStatus(updatedComplaint);
+    }
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('complaint_updated', updatedComplaint);
+    }
+
+    return res.json({
+      success: true,
+      message: 'CSAT feedback recorded successfully',
+      complaint: updatedComplaint,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to record CSAT feedback' });
   }
 });
 
@@ -2884,13 +4736,23 @@ router.put('/:id/close', protect, requireComplaintModule, async (req, res) => {
         return res.status(403).json({ success: false, message: 'Access denied' });
       }
 
+      const auditEntry = {
+        action: 'CLOSED',
+        performedBy: req.user._id ? req.user._id.toString() : '',
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Closed ticket with reason: ${closureReason}`,
+        timestamp: closedAt,
+      };
+
       const updated = {
         ...existing,
         status: 'Closed',
         closureReason,
         closedAt,
         resolvedAt: existing.resolvedAt || closedAt,
-        updatedAt: new Date().toISOString(),
+        auditHistory: [auditEntry, ...(existing.auditHistory || [])],
+        updatedAt: closedAt,
       };
       updated.slaStatus = getComputedSlaStatus(updated);
       fallbackStore.complaints[index] = updated;
@@ -2908,6 +4770,15 @@ router.put('/:id/close', protect, requireComplaintModule, async (req, res) => {
       complaint.closureReason = closureReason;
       complaint.closedAt = new Date();
       if (!complaint.resolvedAt) complaint.resolvedAt = new Date();
+
+      complaint.auditHistory.unshift({
+        action: 'CLOSED',
+        performedBy: req.user._id.toString(),
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Closed ticket with reason: ${closureReason}`,
+        timestamp: new Date(),
+      });
 
       await complaint.save();
       updatedComplaint = complaint.toObject();
@@ -2966,7 +4837,16 @@ router.put('/:id/reopen', protect, requireComplaintModule, async (req, res) => {
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         subject: 'Ticket Reopened',
         content: `Reopened by ${req.user.name}. Reason: ${reopenReason}`,
-        timestamp: new Date().toISOString(),
+        timestamp: reopenedAt,
+      };
+
+      const auditEntry = {
+        action: 'REOPENED',
+        performedBy: req.user._id ? req.user._id.toString() : '',
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Reopened ticket. Reason: ${reopenReason}`,
+        timestamp: reopenedAt,
       };
 
       const updated = {
@@ -2975,10 +4855,13 @@ router.put('/:id/reopen', protect, requireComplaintModule, async (req, res) => {
         reopenReason,
         reopenCount: (existing.reopenCount || 0) + 1,
         reopenedAt,
+        reopenedBy: req.user._id ? req.user._id.toString() : '',
+        reopenedByName: req.user.name || '',
         resolvedAt: null,
         closedAt: null,
         activities: [activityEntry, ...(existing.activities || [])],
-        updatedAt: new Date().toISOString(),
+        auditHistory: [auditEntry, ...(existing.auditHistory || [])],
+        updatedAt: reopenedAt,
       };
       updated.slaStatus = getComputedSlaStatus(updated);
       fallbackStore.complaints[index] = updated;
@@ -2996,6 +4879,8 @@ router.put('/:id/reopen', protect, requireComplaintModule, async (req, res) => {
       complaint.reopenReason = reopenReason;
       complaint.reopenCount = (complaint.reopenCount || 0) + 1;
       complaint.reopenedAt = new Date();
+      complaint.reopenedBy = req.user._id.toString();
+      complaint.reopenedByName = req.user.name || '';
       complaint.resolvedAt = null;
       complaint.closedAt = null;
 
@@ -3008,6 +4893,15 @@ router.put('/:id/reopen', protect, requireComplaintModule, async (req, res) => {
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         subject: 'Ticket Reopened',
         content: `Reopened by ${req.user.name}. Reason: ${reopenReason}`,
+        timestamp: new Date(),
+      });
+
+      complaint.auditHistory.unshift({
+        action: 'REOPENED',
+        performedBy: req.user._id.toString(),
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: `Reopened ticket. Reason: ${reopenReason}`,
         timestamp: new Date(),
       });
 
@@ -3046,12 +4940,136 @@ router.put('/:id/reopen', protect, requireComplaintModule, async (req, res) => {
   }
 });
 
+// @route   GET /api/complaints/:id/related
+// @desc    Get related records: other complaints from same customer, related tasks, linked opportunity/project, and KB articles
+// @access  Private
+router.get('/:id/related', protect, requireComplaintModule, async (req, res) => {
+  try {
+    let allUsers = await getAllUsers();
+    let complaint;
+
+    if (fallbackStore.isFallback) {
+      complaint = (fallbackStore.complaints || []).find((c) => c._id.toString() === req.params.id);
+    } else {
+      const doc = await Complaint.findById(req.params.id);
+      if (doc) complaint = doc.toObject();
+    }
+
+    if (!complaint) {
+      return res.status(404).json({ success: false, message: 'Complaint not found' });
+    }
+
+    if (!canUserAccessComplaint(req.user, complaint, allUsers)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    const scope = getUserScopeContext(req.user, allUsers);
+
+    // 1. Related complaints from the same customer (excluding this complaint), filtered by hierarchy
+    let relatedComplaints = [];
+    if (fallbackStore.isFallback) {
+      relatedComplaints = (fallbackStore.complaints || []).filter((c) => {
+        if (c._id.toString() === complaint._id.toString()) return false;
+        const sameCustomer =
+          (complaint.customerId && c.customerId && c.customerId.toString() === complaint.customerId.toString()) ||
+          (complaint.customerEmail && c.customerEmail && c.customerEmail.toLowerCase() === complaint.customerEmail.toLowerCase()) ||
+          (complaint.customerName && c.customerName && c.customerName.toLowerCase() === complaint.customerName.toLowerCase());
+        return sameCustomer;
+      });
+    } else {
+      const customerQuery = [];
+      if (complaint.customerId) customerQuery.push({ customerId: complaint.customerId });
+      if (complaint.customerEmail) customerQuery.push({ customerEmail: complaint.customerEmail.toLowerCase() });
+      if (complaint.customerPhone) customerQuery.push({ customerPhone: complaint.customerPhone });
+      if (complaint.customerName) customerQuery.push({ customerName: complaint.customerName });
+
+      if (customerQuery.length > 0) {
+        const found = await Complaint.find({
+          _id: { $ne: complaint._id },
+          $or: customerQuery,
+        })
+          .sort({ createdAt: -1 })
+          .limit(10);
+        relatedComplaints = found.map((c) => c.toObject());
+      }
+    }
+
+    // Filter related complaints strictly by user hierarchy
+    if (!scope.isSuperAdmin) {
+      relatedComplaints = relatedComplaints.filter((c) => isComplaintAccessible(scope, c));
+    }
+
+    // 2. Related tasks for this complaint
+    let relatedTasks = [];
+    try {
+      if (!fallbackStore.isFallback && complaint.ticketNumber) {
+        const ticketRegex = new RegExp(escapeRegex(complaint.ticketNumber), 'i');
+        const tasks = await Task.find({
+          $or: [
+            { description: ticketRegex },
+            { remark: ticketRegex },
+            { completionRemark: ticketRegex },
+          ],
+        })
+          .sort({ createdAt: -1 })
+          .limit(10);
+        relatedTasks = tasks.map((t) => t.toObject());
+      }
+    } catch {}
+
+    // 3. Linked Opportunity & Project details
+    let linkedOppDetails = null;
+    let linkedProjDetails = null;
+    try {
+      if (complaint.linkedOpportunity && !fallbackStore.isFallback) {
+        const opp = await Opportunity.findOne({
+          $or: [{ _id: complaint.linkedOpportunity }, { name: complaint.linkedOpportunity }],
+        });
+        if (opp) linkedOppDetails = opp.toObject();
+      }
+      if (complaint.linkedProject && !fallbackStore.isFallback) {
+        const proj = await Project.findOne({
+          $or: [{ _id: complaint.linkedProject }, { name: complaint.linkedProject }],
+        });
+        if (proj) linkedProjDetails = proj.toObject();
+      }
+    } catch {}
+
+    // 4. Suggested KB articles from actual complaints in database
+    let suggestedArticles = [];
+    try {
+      if (!fallbackStore.isFallback) {
+        const kbComplaints = await Complaint.find({
+          'knowledgeBaseArticle.articleId': { $ne: '' },
+          'knowledgeBaseArticle.title': { $ne: '' },
+          category: complaint.category,
+        }).limit(5);
+        suggestedArticles = kbComplaints
+          .map((c) => c.knowledgeBaseArticle)
+          .filter((kb, idx, arr) => kb && kb.title && arr.findIndex((k) => k.title === kb.title) === idx);
+      }
+    } catch {}
+
+    return res.json({
+      success: true,
+      relatedComplaints,
+      relatedTasks,
+      linkedOpportunity: linkedOppDetails,
+      linkedProject: linkedProjDetails,
+      suggestedArticles,
+      knowledgeBaseArticle: complaint.knowledgeBaseArticle || null,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to fetch related records: ' + err.message });
+  }
+});
+
 // @route   POST /api/complaints/:id/link
-// @desc    Link related complaint or Knowledge Base article
+// @desc    Link or unlink related complaint or Knowledge Base article
 // @access  Private
 router.post('/:id/link', protect, requireComplaintModule, async (req, res) => {
   try {
-    const { linkedComplaintId, isDuplicate = false, kbArticle = null } = req.body;
+    const { linkedComplaintId, isDuplicate = false, kbArticle = undefined, linkedOpportunity, linkedProject } = req.body;
     let allUsers = await getAllUsers();
     let updatedComplaint;
 
@@ -3069,11 +5087,23 @@ router.post('/:id/link', protect, requireComplaintModule, async (req, res) => {
         linkedComplaints.push(linkedComplaintId);
       }
 
+      const auditEntry = {
+        action: 'LINKED_RECORDS_UPDATED',
+        performedBy: req.user._id ? req.user._id.toString() : '',
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: kbArticle ? `Linked KB article: ${kbArticle.title}` : kbArticle === null ? 'Unlinked KB article' : 'Updated linked records',
+        timestamp: new Date().toISOString(),
+      };
+
       const updated = {
         ...existing,
         linkedComplaints,
         isDuplicate: isDuplicate !== undefined ? isDuplicate : existing.isDuplicate,
-        knowledgeBaseArticle: kbArticle || existing.knowledgeBaseArticle,
+        knowledgeBaseArticle: kbArticle !== undefined ? kbArticle : existing.knowledgeBaseArticle,
+        linkedOpportunity: linkedOpportunity !== undefined ? linkedOpportunity : existing.linkedOpportunity,
+        linkedProject: linkedProject !== undefined ? linkedProject : existing.linkedProject,
+        auditHistory: [auditEntry, ...(existing.auditHistory || [])],
         updatedAt: new Date().toISOString(),
       };
       fallbackStore.complaints[index] = updated;
@@ -3091,7 +5121,18 @@ router.post('/:id/link', protect, requireComplaintModule, async (req, res) => {
         complaint.linkedComplaints.push(linkedComplaintId);
       }
       if (isDuplicate !== undefined) complaint.isDuplicate = isDuplicate;
-      if (kbArticle) complaint.knowledgeBaseArticle = kbArticle;
+      if (kbArticle !== undefined) complaint.knowledgeBaseArticle = kbArticle;
+      if (linkedOpportunity !== undefined) complaint.linkedOpportunity = linkedOpportunity;
+      if (linkedProject !== undefined) complaint.linkedProject = linkedProject;
+
+      complaint.auditHistory.unshift({
+        action: 'LINKED_RECORDS_UPDATED',
+        performedBy: req.user._id.toString(),
+        performedByName: req.user.name || '',
+        role: req.user.role || 'User',
+        delta: kbArticle ? `Linked KB article: ${kbArticle.title}` : kbArticle === null ? 'Unlinked KB article' : 'Updated linked records',
+        timestamp: new Date(),
+      });
 
       await complaint.save();
       updatedComplaint = complaint.toObject();
@@ -3103,7 +5144,7 @@ router.post('/:id/link', protect, requireComplaintModule, async (req, res) => {
       complaint: updatedComplaint,
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to link item' });
+    res.status(500).json({ success: false, message: 'Failed to link item: ' + err.message });
   }
 });
 
@@ -3130,6 +5171,13 @@ router.delete('/:id', protect, requireComplaintModule, async (req, res) => {
       if (!complaint) {
         return res.status(404).json({ success: false, message: 'Complaint not found' });
       }
+
+      if (['Resolved', 'Closed'].includes(complaint.status)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Resolved and closed complaints cannot be deleted. Users can only view ticket details.',
+        });
+      }
       deletedObj = complaint;
 
       const initialLen = (fallbackStore.complaints || []).length;
@@ -3142,6 +5190,13 @@ router.delete('/:id', protect, requireComplaintModule, async (req, res) => {
       const complaint = await Complaint.findById(req.params.id);
       if (!complaint) {
         return res.status(404).json({ success: false, message: 'Complaint not found' });
+      }
+
+      if (['Resolved', 'Closed'].includes(complaint.status)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Resolved and closed complaints cannot be deleted. Users can only view ticket details.',
+        });
       }
       deletedObj = complaint.toObject();
 

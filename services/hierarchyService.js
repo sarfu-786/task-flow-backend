@@ -4,14 +4,37 @@ const { fallbackStore } = require('../config/db');
 // Safe regex character escaper
 const escapeRegex = (str) => (str ? str.toString().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '');
 
+const AI_EXCLUDED_EMAILS = new Set([
+  'sarfu@gmail.com',
+  'admin@taskflow.com',
+  'rohan.verma@taskflow.com',
+  'ananya.iyer@taskflow.com',
+  'vikram.malhotra@taskflow.com',
+  'neha.gupta@taskflow.com',
+  'rajesh.kothari@taskflow.com',
+  'kavita.reddy@taskflow.com',
+  'sarah.test1788242656501@example.com',
+  'manager.1788243837519@company.com',
+  'emma.1788243837519@company.com',
+]);
+
+const isAiExcludedEmail = (email) => {
+  if (!email) return false;
+  const clean = email.toLowerCase().trim();
+  return AI_EXCLUDED_EMAILS.has(clean) || clean.endsWith('@taskflow.com') || clean.endsWith('@company.com') || clean.endsWith('@example.com');
+};
+
 /**
  * Fetch all users from DB or fallbackStore
  */
 const getAllUsers = async () => {
+  let list = [];
   if (fallbackStore.isFallback) {
-    return fallbackStore.users || [];
+    list = fallbackStore.users || [];
+  } else {
+    list = await User.find({}).select('_id name username email role roles department reportsTo reportsToName createdBy status').lean();
   }
-  return await User.find({}).select('_id name username email role roles department reportsTo reportsToName createdBy status').lean();
+  return list.filter((u) => !isAiExcludedEmail(u.email));
 };
 
 /**
@@ -149,12 +172,27 @@ const isComplaintAccessible = (scope, complaint) => {
   const cCreatedById = complaint.createdBy ? (complaint.createdBy._id ? complaint.createdBy._id.toString() : complaint.createdBy.toString()).trim() : '';
   const cReportedBy = (complaint.reportedBy || '').toLowerCase().trim();
 
+  // Escalated recipient & reviewer access
+  const cEscalatedToId = complaint.escalatedToId
+    ? (complaint.escalatedToId._id ? complaint.escalatedToId._id.toString() : complaint.escalatedToId.toString()).trim()
+    : '';
+  const cEscalatedToName = (complaint.escalatedTo || complaint.escalatedToName || '').toLowerCase().trim();
+  const cEscalationReviewerId = complaint.escalationReviewerId
+    ? (complaint.escalationReviewerId._id ? complaint.escalationReviewerId._id.toString() : complaint.escalationReviewerId.toString()).trim()
+    : '';
+  const cEscalationReviewerName = (complaint.escalationReviewer || '').toLowerCase().trim();
+
   if (cAssignedId && scope.allowedUserIds.has(cAssignedId)) return true;
   if (cUserId && scope.allowedUserIds.has(cUserId)) return true;
   if (cCreatedById && scope.allowedUserIds.has(cCreatedById)) return true;
 
+  if (cEscalatedToId && scope.allowedUserIds.has(cEscalatedToId)) return true;
+  if (cEscalationReviewerId && scope.allowedUserIds.has(cEscalationReviewerId)) return true;
+
   if (cAssignedName && cAssignedName !== 'unassigned' && scope.allowedNames.has(cAssignedName)) return true;
   if (cReportedBy && scope.allowedNames.has(cReportedBy)) return true;
+  if (cEscalatedToName && scope.allowedNames.has(cEscalatedToName)) return true;
+  if (cEscalationReviewerName && scope.allowedNames.has(cEscalationReviewerName)) return true;
 
   return false;
 };
@@ -163,7 +201,9 @@ const isLeadAccessible = (scope, lead) => {
   if (!lead) return false;
   if (scope.isSuperAdmin) return true;
 
-  if (lead.is_high_priority_pool || lead.assignedTo === 'Unassigned (High-Priority Queue)') {
+  // Unassigned high-priority pool is strictly for active, unconverted leads waiting to be claimed
+  const isConverted = lead.status === 'Converted' || !!lead.opportunityId || !!lead.convertedOpportunityId;
+  if (!isConverted && (lead.is_high_priority_pool || lead.assignedTo === 'Unassigned (High-Priority Queue)')) {
     return true;
   }
 
@@ -274,15 +314,138 @@ const isUserAccessible = (scope, targetUser) => {
   return scope.allowedUserIds.has(targetId);
 };
 
+/**
+ * Checks whether a user can access a customer record for Complaint Management
+ * Rules:
+ * 1. Super Admin can access all customer records.
+ * 2. High priority pool / unassigned queue customer records are accessible to all.
+ * 3. A user can access customer records directly assigned to them (user ID or user name).
+ * 4. A manager can access customer records assigned to themselves or any of their direct/indirect subordinates.
+ * 5. A regular user can access customer records belonging to their reporting manager and their team hierarchy.
+ * 6. Strict constraint: A user can NEVER access another manager's unrelated customer records.
+ */
+/**
+ * Check if a customer record (Lead or Opportunity) is accessible to a user based strictly on
+ * organizational hierarchy and role-based visibility:
+ * 1. Super Admin can access all organization customers.
+ * 2. Manager can access their own and their subordinate hierarchy's customers.
+ * 3. Employee can access only their own and their permitted subordinate hierarchy's customers.
+ * 4. Never display customers belonging exclusively to another inaccessible workspace.
+ */
+const isCustomerAccessibleForUser = (user, customer, allUsers = []) => {
+  if (!user || !customer) return false;
+
+  const userRoles = Array.isArray(user.roles) && user.roles.length > 0 ? user.roles : [user.role || 'User'];
+  const isSuperAdmin = userRoles.some((r) => r === 'Super Admin' || r === 'superadmin') || user.role === 'Super Admin';
+  if (isSuperAdmin) return true;
+
+  const scope = getUserScopeContext(user, allUsers);
+  if (!scope || !scope.allowedUserIds || !scope.allowedNames) return false;
+
+  const cAssignedId = customer.assignedToId
+    ? (customer.assignedToId._id ? customer.assignedToId._id.toString() : customer.assignedToId.toString()).trim()
+    : (customer.user ? (customer.user._id ? customer.user._id.toString() : customer.user.toString()).trim() : '');
+  const cAssignedName = (customer.assignedTo || customer.assignedSalesUser || customer.assignedToName || '').toLowerCase().trim();
+  const cAssignedById = customer.assignedById ? (customer.assignedById._id ? customer.assignedById._id.toString() : customer.assignedById.toString()).trim() : '';
+  const cAssignedByName = (customer.assignedBy || '').toLowerCase().trim();
+  const cCreatedById = customer.createdBy ? (customer.createdBy._id ? customer.createdBy._id.toString() : customer.createdBy.toString()).trim() : '';
+
+  if (cAssignedId && scope.allowedUserIds.has(cAssignedId)) return true;
+  if (cAssignedById && scope.allowedUserIds.has(cAssignedById)) return true;
+  if (cCreatedById && scope.allowedUserIds.has(cCreatedById)) return true;
+
+  if (cAssignedName && scope.allowedNames.has(cAssignedName)) return true;
+  if (cAssignedByName && Array.from(scope.allowedNames).some((n) => cAssignedByName.includes(n))) return true;
+
+  return false;
+};
+
+/**
+ * Helper to resolve the single immediate reporting manager for a user according to the organizational hierarchy.
+ * Returns null if the user is Super Admin or has no parent authority.
+ * Strictly adheres to immediate reporting relationship:
+ * - Super Admin must not automatically appear in every employee's dropdown.
+ * - If a user has no reporting manager, returns null (no eligible authority).
+ * - Does not fetch users based merely on role or designation (e.g. Manager/Super Admin).
+ * - Does not traverse upper ancestors.
+ */
+const getImmediateReportingManager = (currentUser, allUsers = []) => {
+  if (!currentUser || !allUsers || !Array.isArray(allUsers)) return null;
+
+  const currentId = (currentUser._id ? currentUser._id.toString() : (currentUser.id ? currentUser.id.toString() : '')).trim();
+  const currentRoles = Array.isArray(currentUser.roles) && currentUser.roles.length > 0 ? currentUser.roles : [currentUser.role || 'User'];
+  const isSuperAdmin = currentRoles.some((r) => r === 'Super Admin' || r === 'superadmin') || currentUser.role === 'Super Admin';
+
+  // Super Admin is top-level authority: has no parent authority
+  if (isSuperAdmin) {
+    return null;
+  }
+
+  // 1. Resolve via reportsTo ID
+  const repId = currentUser.reportsTo
+    ? (currentUser.reportsTo._id ? currentUser.reportsTo._id.toString() : currentUser.reportsTo.toString()).trim()
+    : '';
+  if (repId && repId !== currentId) {
+    const found = allUsers.find(
+      (u) => u && u._id && u._id.toString() === repId && u.status !== 'Inactive' && u.status !== 'Suspended'
+    );
+    if (found) return found;
+  }
+
+  // 2. Resolve via reportsToName string
+  const cleanRepName = (currentUser.reportsToName || '').replace(/\s*\([^)]*\)/g, '').trim().toLowerCase();
+  if (cleanRepName) {
+    const found = allUsers.find(
+      (u) =>
+        u &&
+        u._id &&
+        u._id.toString() !== currentId &&
+        ((u.name || '').toLowerCase().trim() === cleanRepName || (u.username || '').toLowerCase().trim() === cleanRepName) &&
+        u.status !== 'Inactive' &&
+        u.status !== 'Suspended'
+    );
+    if (found) return found;
+  }
+
+  // If user has no reporting manager, show no eligible authority
+  return null;
+};
+
+/**
+ * Returns ONLY the immediate reporting manager as the single authorized escalation recipient.
+ * Returns an empty array if the user is Super Admin or has no parent authority.
+ */
+const getAuthorizedEscalationRecipients = (currentUser, allUsers = []) => {
+  const immediateManager = getImmediateReportingManager(currentUser, allUsers);
+  if (!immediateManager) return [];
+
+  return [
+    {
+      _id: immediateManager._id.toString(),
+      name: immediateManager.name || immediateManager.username,
+      username: (immediateManager.username || '').toLowerCase().trim(),
+      email: immediateManager.email || '',
+      role: immediateManager.role || (immediateManager.roles && immediateManager.roles[0]) || 'Manager',
+      department: immediateManager.department || '',
+      designation: immediateManager.designation || immediateManager.role || 'Immediate Reporting Manager',
+      isDirectManager: true,
+    },
+  ];
+};
+
 module.exports = {
   getAllUsers,
   getSubordinateUserIds,
   getUserScopeContext,
   isComplaintAccessible,
   isLeadAccessible,
+  isCustomerAccessibleForUser,
   isTaskAccessible,
   isOpportunityAccessible,
   isProjectAccessible,
   isUserAccessible,
+  getReportingManager: getImmediateReportingManager,
+  getImmediateReportingManager,
+  getAuthorizedEscalationRecipients,
   escapeRegex,
 };

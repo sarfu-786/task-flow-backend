@@ -13,16 +13,16 @@ function isNotificationForUser(n, user) {
   const isManager = ['Manager', 'Executive', 'Administrator', 'Super Admin'].includes(user.role);
   const userName = (user.name || '').toLowerCase().trim();
   const userUsername = (user.username || '').toLowerCase().trim();
-  const userId = user._id ? user._id.toString() : '';
+  const userId = (user._id || user.id || '').toString();
 
   const rUser = n.recipientUser ? n.recipientUser.toString() : '';
   const rName = (n.recipientName || '').toLowerCase().trim();
   const isDirectRecipient =
-    (rUser && rUser === userId) ||
-    (rName && (rName === userName || rName === userUsername || userName.includes(rName) || rName.includes(userName)));
+    (rUser && (rUser === userId || (user.id && rUser === user.id.toString()) || (user._id && rUser === user._id.toString()))) ||
+    (rName && (rName === userName || rName === userUsername || (userName && rName && (userName.includes(rName) || rName.includes(userName)))));
 
-  // Direct Assigner Rule: Task completion notifications MUST only go to the assigner
-  if (n.type === 'task_completed') {
+  // Direct Recipient Only Rule: Escalation notifications & task completions MUST only go to the direct recipient
+  if (n.type === 'complaint_escalated' || n.type === 'task_completed' || n.forRole === 'DirectRecipientOnly') {
     return isDirectRecipient;
   }
 
@@ -46,33 +46,49 @@ function buildUserNotifFilter(user) {
   const isManager = user && ['Manager', 'Executive', 'Administrator', 'Super Admin'].includes(user.role);
   const regexName = escapeRegex(user?.name || '');
   const regexUsername = escapeRegex(user?.username || '');
-  const userId = user?._id ? user._id.toString() : '';
+  const userId = (user?._id || user?.id || '').toString();
 
+  const mongoose = require('mongoose');
   const directConditions = [
-    ...(userId ? [{ recipientUser: user._id }] : []),
+    ...(userId ? [
+      { recipientUser: user._id || user.id },
+      { recipientUser: userId },
+      ...(mongoose.Types.ObjectId.isValid(userId) ? [{ recipientUser: new mongoose.Types.ObjectId(userId) }] : []),
+    ] : []),
     ...(regexName ? [{ recipientName: new RegExp(`^${regexName}$`, 'i') }] : []),
     ...(regexUsername ? [{ recipientName: new RegExp(`^${regexUsername}$`, 'i') }] : []),
   ];
+
+  const nonDirectTypes = ['task_completed', 'complaint_escalated'];
 
   if (isSuperAdmin) {
     return {
       $or: [
         ...directConditions,
-        { forRole: { $in: ['Super Admin', 'Manager', 'All'] }, type: { $ne: 'task_completed' } },
+        {
+          forRole: { $in: ['Super Admin', 'Manager', 'All'] },
+          type: { $nin: nonDirectTypes },
+        },
       ],
     };
   } else if (isManager) {
     return {
       $or: [
         ...directConditions,
-        { forRole: { $in: ['Manager', 'All'] }, type: { $ne: 'task_completed' } },
+        {
+          forRole: { $in: ['Manager', 'All'] },
+          type: { $nin: nonDirectTypes },
+        },
       ],
     };
   } else {
     return {
       $or: [
         ...directConditions,
-        { forRole: { $in: ['User', 'All'] }, type: { $ne: 'task_completed' } },
+        {
+          forRole: { $in: ['User', 'All'] },
+          type: { $nin: nonDirectTypes },
+        },
       ],
     };
   }

@@ -53,6 +53,16 @@ const userSchema = new mongoose.Schema({
     type: String,
     default: 'Internet Work',
   },
+  city: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  location: {
+    type: String,
+    default: '',
+    trim: true,
+  },
   avatar: {
     type: String,
     default: '',

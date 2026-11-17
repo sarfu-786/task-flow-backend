@@ -5,6 +5,26 @@ const User = require('../models/User');
 const { protect, checkRole } = require('../middleware/auth');
 const { fallbackStore } = require('../config/db');
 
+const AI_EXCLUDED_EMAILS = new Set([
+  'sarfu@gmail.com',
+  'admin@taskflow.com',
+  'rohan.verma@taskflow.com',
+  'ananya.iyer@taskflow.com',
+  'vikram.malhotra@taskflow.com',
+  'neha.gupta@taskflow.com',
+  'rajesh.kothari@taskflow.com',
+  'kavita.reddy@taskflow.com',
+  'sarah.test1788242656501@example.com',
+  'manager.1788243837519@company.com',
+  'emma.1788243837519@company.com',
+]);
+
+const isAiExcludedEmail = (email) => {
+  if (!email) return false;
+  const clean = email.toLowerCase().trim();
+  return AI_EXCLUDED_EMAILS.has(clean) || clean.endsWith('@taskflow.com') || clean.endsWith('@company.com') || clean.endsWith('@example.com');
+};
+
 // Helper to get all user IDs that belong to the requester's reporting branch or were created by requester
 const getScopedUserIds = (requester, allUsers) => {
   if (!requester) return new Set();
@@ -106,7 +126,7 @@ router.get('/', protect, async (req, res) => {
     const isUnrestrictedScope = scope === 'all' || all === 'true';
 
     if (fallbackStore.isFallback) {
-      let usersList = fallbackStore.users.map((u) => {
+      let usersList = fallbackStore.users.filter((u) => !isAiExcludedEmail(u.email)).map((u) => {
         const userRoles = Array.isArray(u.roles) && u.roles.length > 0 ? u.roles : [u.role || 'User'];
         return {
           _id: u._id,
@@ -116,6 +136,8 @@ router.get('/', protect, async (req, res) => {
           role: u.role || userRoles[0],
           roles: userRoles,
           department: u.department,
+          city: u.city || '',
+          location: u.location || '',
           avatar: u.avatar,
           status: u.status || 'Approved',
           reportsTo: u.reportsTo || null,
@@ -271,6 +293,8 @@ router.post('/', protect, async (req, res) => {
       password,
       role = 'User',
       department,
+      city,
+      location,
       reportsTo,
       reportsToName,
     } = req.body;
@@ -324,7 +348,15 @@ router.post('/', protect, async (req, res) => {
             message: 'You can only assign users to report to yourself or subordinates within your hierarchy.',
           });
         }
-        const targetParent = allUsers.find((u) => u._id && u._id.toString() === reportsTo.toString());
+        const cleanRName = (reportsToName || '').toLowerCase().replace(/\s*\([^)]*\)/g, '').trim();
+        const rawRName = (reportsToName || '').toLowerCase().trim();
+        const repIdStr = reportsTo ? (reportsTo._id ? reportsTo._id.toString() : reportsTo.toString()) : '';
+        const targetParent = allUsers.find(
+          (u) =>
+            (repIdStr && u._id && u._id.toString() === repIdStr) ||
+            (cleanRName && u.name && u.name.toLowerCase().trim() === cleanRName) ||
+            (rawRName && u.name && u.name.toLowerCase().trim() === rawRName)
+        );
         if (targetParent) {
           finalReportsTo = targetParent._id.toString();
           finalReportsToName = `${targetParent.name} (${targetParent.role || 'User'})`;
@@ -345,7 +377,15 @@ router.post('/', protect, async (req, res) => {
             message: 'Managers can only assign users to report to themselves or subordinates within their team branch.',
           });
         }
-        const targetParent = allUsers.find((u) => u._id && u._id.toString() === reportsTo.toString());
+        const cleanRName = (reportsToName || '').toLowerCase().replace(/\s*\([^)]*\)/g, '').trim();
+        const rawRName = (reportsToName || '').toLowerCase().trim();
+        const repIdStr = reportsTo ? (reportsTo._id ? reportsTo._id.toString() : reportsTo.toString()) : '';
+        const targetParent = allUsers.find(
+          (u) =>
+            (repIdStr && u._id && u._id.toString() === repIdStr) ||
+            (cleanRName && u.name && u.name.toLowerCase().trim() === cleanRName) ||
+            (rawRName && u.name && u.name.toLowerCase().trim() === rawRName)
+        );
         if (targetParent) {
           finalReportsTo = targetParent._id.toString();
           finalReportsToName = `${targetParent.name} (${targetParent.role || 'User'})`;
@@ -359,7 +399,15 @@ router.post('/', protect, async (req, res) => {
         const allUsers = fallbackStore.isFallback
           ? fallbackStore.users
           : await User.find({}).select('_id name username role reportsTo reportsToName createdBy').lean();
-        const targetParent = allUsers.find((u) => u._id && u._id.toString() === reportsTo.toString());
+        const cleanRName = (reportsToName || '').toLowerCase().replace(/\s*\([^)]*\)/g, '').trim();
+        const rawRName = (reportsToName || '').toLowerCase().trim();
+        const repIdStr = reportsTo ? (reportsTo._id ? reportsTo._id.toString() : reportsTo.toString()) : '';
+        const targetParent = allUsers.find(
+          (u) =>
+            (repIdStr && u._id && u._id.toString() === repIdStr) ||
+            (cleanRName && u.name && u.name.toLowerCase().trim() === cleanRName) ||
+            (rawRName && u.name && u.name.toLowerCase().trim() === rawRName)
+        );
         if (targetParent) {
           finalReportsTo = targetParent._id.toString();
           finalReportsToName = `${targetParent.name} (${targetParent.role || 'User'})`;
@@ -401,6 +449,8 @@ router.post('/', protect, async (req, res) => {
         role: targetRole || userRoles[0],
         roles: userRoles,
         department: targetDept,
+        city: (city || req.body.city || '').toString().trim(),
+        location: (location || req.body.location || '').toString().trim(),
         avatar: req.body.avatar || '',
         reportsTo: finalReportsTo,
         reportsToName: finalReportsToName,
@@ -554,6 +604,8 @@ router.put('/:id', protect, async (req, res) => {
       username,
       role,
       department,
+      city,
+      location,
       avatar,
       password,
       newPassword,
@@ -654,6 +706,30 @@ router.put('/:id', protect, async (req, res) => {
         ? req.body.roles
         : (isManagerOrAdmin && role ? [role] : (existing.roles || [existing.role || 'User']));
 
+      let finalReportsTo = reportsTo !== undefined ? reportsTo : existing.reportsTo;
+      let finalReportsToName = reportsToName !== undefined ? reportsToName : existing.reportsToName;
+
+      if (reportsTo !== undefined || reportsToName !== undefined) {
+        if (finalReportsTo || finalReportsToName) {
+          const cleanRName = (finalReportsToName || '').toLowerCase().replace(/\s*\([^)]*\)/g, '').trim();
+          const rawRName = (finalReportsToName || '').toLowerCase().trim();
+          const repIdStr = finalReportsTo ? (finalReportsTo._id ? finalReportsTo._id.toString() : finalReportsTo.toString()) : '';
+          const targetParent = allUsers.find(
+            (u) =>
+              (repIdStr && u._id && u._id.toString() === repIdStr) ||
+              (cleanRName && u.name && u.name.toLowerCase().trim() === cleanRName) ||
+              (rawRName && u.name && u.name.toLowerCase().trim() === rawRName)
+          );
+          if (targetParent) {
+            finalReportsTo = targetParent._id.toString();
+            finalReportsToName = `${targetParent.name} (${targetParent.role || 'User'})`;
+          }
+        } else {
+          finalReportsTo = null;
+          finalReportsToName = '';
+        }
+      }
+
       const updated = {
         ...existing,
         name: name !== undefined ? name.trim() : existing.name,
@@ -662,9 +738,11 @@ router.put('/:id', protect, async (req, res) => {
         role: finalRole,
         roles: finalRoles,
         department: department !== undefined ? department.trim() : existing.department,
+        city: city !== undefined ? city.trim() : (existing.city || ''),
+        location: location !== undefined ? location.trim() : (existing.location || ''),
         avatar: avatar !== undefined ? avatar : existing.avatar,
-        reportsTo: reportsTo !== undefined ? reportsTo : existing.reportsTo,
-        reportsToName: reportsToName !== undefined ? reportsToName : existing.reportsToName,
+        reportsTo: finalReportsTo,
+        reportsToName: finalReportsToName,
         nodeId: nodeId !== undefined ? nodeId : existing.nodeId,
         nodeType: nodeType !== undefined ? nodeType : existing.nodeType,
         reportsToNode: reportsToNode !== undefined ? reportsToNode : existing.reportsToNode,
@@ -721,9 +799,34 @@ router.put('/:id', protect, async (req, res) => {
       if (cleanUsername !== undefined) user.username = cleanUsername;
       if (isManagerOrAdmin && role) user.role = role;
       if (department !== undefined) user.department = department.trim();
+      if (city !== undefined) user.city = city.trim();
+      if (location !== undefined) user.location = location.trim();
       if (avatar !== undefined) user.avatar = avatar;
-      if (reportsTo !== undefined) user.reportsTo = reportsTo;
-      if (reportsToName !== undefined) user.reportsToName = reportsToName;
+      if (reportsTo !== undefined || reportsToName !== undefined) {
+        let repVal = reportsTo !== undefined ? reportsTo : user.reportsTo;
+        let repNameVal = reportsToName !== undefined ? reportsToName : user.reportsToName;
+        if (repVal || repNameVal) {
+          const cleanRName = (repNameVal || '').toLowerCase().replace(/\s*\([^)]*\)/g, '').trim();
+          const rawRName = (repNameVal || '').toLowerCase().trim();
+          const repIdStr = repVal ? (repVal._id ? repVal._id.toString() : repVal.toString()) : '';
+          const targetParent = allUsers.find(
+            (u) =>
+              (repIdStr && u._id && u._id.toString() === repIdStr) ||
+              (cleanRName && u.name && u.name.toLowerCase().trim() === cleanRName) ||
+              (rawRName && u.name && u.name.toLowerCase().trim() === rawRName)
+          );
+          if (targetParent) {
+            user.reportsTo = targetParent._id.toString();
+            user.reportsToName = `${targetParent.name} (${targetParent.role || 'User'})`;
+          } else {
+            if (reportsTo !== undefined) user.reportsTo = reportsTo;
+            if (reportsToName !== undefined) user.reportsToName = reportsToName;
+          }
+        } else {
+          user.reportsTo = null;
+          user.reportsToName = '';
+        }
+      }
       if (nodeId !== undefined) user.nodeId = nodeId;
       if (nodeType !== undefined) user.nodeType = nodeType;
       if (reportsToNode !== undefined) user.reportsToNode = reportsToNode;
@@ -744,6 +847,8 @@ router.put('/:id', protect, async (req, res) => {
             username: user.username,
             role: user.role,
             department: user.department,
+            city: user.city || '',
+            location: user.location || '',
             avatar: user.avatar,
             reportsTo: user.reportsTo,
             reportsToName: user.reportsToName,
@@ -968,8 +1073,31 @@ router.put('/:id/approval', protect, checkRole('Super Admin'), async (req, res) 
       fallbackStore.users[uIndex].status = status;
       if (department) fallbackStore.users[uIndex].department = department;
       if (role) fallbackStore.users[uIndex].role = role;
-      if (reportsTo !== undefined) fallbackStore.users[uIndex].reportsTo = reportsTo;
-      if (reportsToName !== undefined) fallbackStore.users[uIndex].reportsToName = reportsToName;
+      if (reportsTo !== undefined || reportsToName !== undefined) {
+        let repVal = reportsTo !== undefined ? reportsTo : fallbackStore.users[uIndex].reportsTo;
+        let repNameVal = reportsToName !== undefined ? reportsToName : fallbackStore.users[uIndex].reportsToName;
+        if (repVal || repNameVal) {
+          const cleanRName = (repNameVal || '').toLowerCase().replace(/\s*\([^)]*\)/g, '').trim();
+          const rawRName = (repNameVal || '').toLowerCase().trim();
+          const repIdStr = repVal ? (repVal._id ? repVal._id.toString() : repVal.toString()) : '';
+          const targetParent = fallbackStore.users.find(
+            (u) =>
+              (repIdStr && u._id && u._id.toString() === repIdStr) ||
+              (cleanRName && u.name && u.name.toLowerCase().trim() === cleanRName) ||
+              (rawRName && u.name && u.name.toLowerCase().trim() === rawRName)
+          );
+          if (targetParent) {
+            fallbackStore.users[uIndex].reportsTo = targetParent._id.toString();
+            fallbackStore.users[uIndex].reportsToName = `${targetParent.name} (${targetParent.role || 'User'})`;
+          } else {
+            if (reportsTo !== undefined) fallbackStore.users[uIndex].reportsTo = reportsTo;
+            if (reportsToName !== undefined) fallbackStore.users[uIndex].reportsToName = reportsToName;
+          }
+        } else {
+          fallbackStore.users[uIndex].reportsTo = null;
+          fallbackStore.users[uIndex].reportsToName = '';
+        }
+      }
 
       // Automatically mark corresponding registration notifications as read
       const targetEmail = (fallbackStore.users[uIndex].email || '').toLowerCase();
@@ -1015,8 +1143,31 @@ router.put('/:id/approval', protect, checkRole('Super Admin'), async (req, res) 
       user.status = status;
       if (department) user.department = department;
       if (role) user.role = role;
-      if (reportsTo !== undefined) user.reportsTo = reportsTo;
-      if (reportsToName !== undefined) user.reportsToName = reportsToName;
+      if (reportsTo !== undefined || reportsToName !== undefined) {
+        let repVal = reportsTo !== undefined ? reportsTo : user.reportsTo;
+        let repNameVal = reportsToName !== undefined ? reportsToName : user.reportsToName;
+        if (repVal || repNameVal) {
+          const cleanRName = (repNameVal || '').toLowerCase().replace(/\s*\([^)]*\)/g, '').trim();
+          const rawRName = (repNameVal || '').toLowerCase().trim();
+          const repIdStr = repVal ? (repVal._id ? repVal._id.toString() : repVal.toString()) : '';
+          const targetParent = allUsers.find(
+            (u) =>
+              (repIdStr && u._id && u._id.toString() === repIdStr) ||
+              (cleanRName && u.name && u.name.toLowerCase().trim() === cleanRName) ||
+              (rawRName && u.name && u.name.toLowerCase().trim() === rawRName)
+          );
+          if (targetParent) {
+            user.reportsTo = targetParent._id.toString();
+            user.reportsToName = `${targetParent.name} (${targetParent.role || 'User'})`;
+          } else {
+            if (reportsTo !== undefined) user.reportsTo = reportsTo;
+            if (reportsToName !== undefined) user.reportsToName = reportsToName;
+          }
+        } else {
+          user.reportsTo = null;
+          user.reportsToName = '';
+        }
+      }
       await user.save();
 
       // Automatically mark corresponding registration notifications as read in MongoDB

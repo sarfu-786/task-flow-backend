@@ -4,7 +4,21 @@ const activitySchema = new mongoose.Schema({
   activityId: { type: String, default: () => 'act_' + Math.random().toString(16).substring(2, 10) },
   type: {
     type: String,
-    enum: ['Call', 'Email', 'Note', 'Task', 'Follow-up', 'Customer Communication', 'Status Change', 'Investigation', 'Escalation'],
+    enum: [
+      'Call Log',
+      'Call',
+      'Email',
+      'Meeting',
+      'Internal Note',
+      'Note',
+      'Task',
+      'Follow-up',
+      'Customer Communication',
+      'Status Change',
+      'Status Update',
+      'Investigation',
+      'Escalation',
+    ],
     default: 'Note',
   },
   author: { type: String, default: '' },
@@ -17,6 +31,16 @@ const activitySchema = new mongoose.Schema({
   nextAction: { type: String, default: '' },
   nextFollowUpDate: { type: String, default: '' },
   nextFollowUpTime: { type: String, default: '' },
+  isInternal: { type: Boolean, default: false },
+  followUpStatus: {
+    type: String,
+    enum: ['Pending', 'Completed', 'Overdue', 'Cancelled', 'N/A'],
+    default: 'N/A',
+  },
+  assignedEmployee: { type: String, default: '' },
+  assignedEmployeeId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  completedAt: { type: Date, default: null },
+  completedBy: { type: String, default: '' },
   timestamp: { type: Date, default: Date.now },
 });
 
@@ -31,6 +55,28 @@ const assignmentHistorySchema = new mongoose.Schema({
   timestamp: { type: Date, default: Date.now },
 });
 
+const locationSchema = new mongoose.Schema(
+  {
+    type: {
+      type: String,
+      enum: ['GPS', 'IP', 'Manual', 'Unknown'],
+      default: 'Unknown',
+    },
+    latitude: { type: Number, default: null },
+    longitude: { type: Number, default: null },
+    accuracy: { type: String, default: '', trim: true },
+    address: { type: String, default: '', trim: true },
+    city: { type: String, default: '', trim: true },
+    state: { type: String, default: '', trim: true },
+    country: { type: String, default: '', trim: true },
+    postalCode: { type: String, default: '', trim: true },
+    ip: { type: String, default: '', trim: true },
+    mapsUrl: { type: String, default: '', trim: true },
+    capturedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const complaintSchema = new mongoose.Schema({
   ticketNumber: {
     type: String,
@@ -42,6 +88,11 @@ const complaintSchema = new mongoose.Schema({
     type: String,
     trim: true,
     default: '',
+  },
+  customerId: {
+    type: mongoose.Schema.Types.Mixed,
+    ref: 'Lead',
+    default: null,
   },
   customerName: {
     type: String,
@@ -101,12 +152,23 @@ const complaintSchema = new mongoose.Schema({
   },
   source: {
     type: String,
-    enum: ['Web Portal', 'Email', 'Phone', 'Chat', 'In-Person', 'Mobile App', 'Social Media', 'Other'],
+    enum: [
+      'Web Portal',
+      'Web Portal (Customer Self-Service)',
+      'Customer Self-Service',
+      'Email',
+      'Phone',
+      'Chat',
+      'In-Person',
+      'Mobile App',
+      'Social Media',
+      'Other',
+    ],
     default: 'Web Portal',
   },
   priority: {
     type: String,
-    enum: ['Urgent', 'High', 'Medium', 'Low'],
+    enum: ['Critical', 'Urgent', 'High', 'Medium', 'Low'],
     default: 'Medium',
   },
   severity: {
@@ -118,6 +180,7 @@ const complaintSchema = new mongoose.Schema({
     type: String,
     enum: [
       'Logged',
+      'Open',
       'Under Investigation',
       'Assigned',
       'In Progress',
@@ -138,7 +201,7 @@ const complaintSchema = new mongoose.Schema({
     type: Date,
     default: function () {
       let hours = this.slaHours || 24;
-      if (this.priority === 'Urgent') hours = 4;
+      if (this.priority === 'Critical' || this.priority === 'Urgent') hours = 4;
       else if (this.priority === 'High') hours = 12;
       else if (this.priority === 'Low') hours = 48;
       return new Date(Date.now() + hours * 60 * 60 * 1000);
@@ -148,7 +211,7 @@ const complaintSchema = new mongoose.Schema({
     type: Date,
     default: function () {
       let hours = 4;
-      if (this.priority === 'Urgent') hours = 1;
+      if (this.priority === 'Critical' || this.priority === 'Urgent') hours = 1;
       else if (this.priority === 'High') hours = 2;
       else if (this.priority === 'Low') hours = 8;
       return new Date(Date.now() + hours * 60 * 60 * 1000);
@@ -220,6 +283,21 @@ const complaintSchema = new mongoose.Schema({
     default: '',
     trim: true,
   },
+  nextFollowUpAssignedTo: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  nextFollowUpAssignedToId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+  },
+  nextFollowUpStatus: {
+    type: String,
+    enum: ['Pending', 'Completed', 'Overdue', 'Cancelled'],
+    default: 'Pending',
+  },
   // Investigation & Root Cause Analysis (CAPA)
   investigationNotes: {
     type: String,
@@ -241,6 +319,34 @@ const complaintSchema = new mongoose.Schema({
     default: '',
     trim: true,
   },
+  capaActionOwner: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  capaActionOwnerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+  },
+  capaTargetDate: {
+    type: Date,
+    default: null,
+  },
+  capaVerificationNotes: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  capaVerificationStatus: {
+    type: String,
+    enum: ['Pending', 'In Progress', 'Verified', 'Closed'],
+    default: 'Pending',
+  },
+  fiveWhys: {
+    type: [String],
+    default: [],
+  },
   // Resolution & Closure
   resolutionSummary: {
     type: String,
@@ -253,6 +359,16 @@ const complaintSchema = new mongoose.Schema({
     trim: true,
   },
   resolutionCode: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  resolvedBy: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  resolvedByName: {
     type: String,
     default: '',
     trim: true,
@@ -273,12 +389,31 @@ const complaintSchema = new mongoose.Schema({
     default: '',
     trim: true,
   },
+  csatFeedbackDate: {
+    type: Date,
+    default: null,
+  },
+  csatStatus: {
+    type: String,
+    enum: ['Pending', 'Received', 'Declined'],
+    default: 'Pending',
+  },
   // Reopen & Escalation Handling
   reopenCount: {
     type: Number,
     default: 0,
   },
   reopenReason: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  reopenedBy: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  reopenedByName: {
     type: String,
     default: '',
     trim: true,
@@ -297,6 +432,46 @@ const complaintSchema = new mongoose.Schema({
     trim: true,
   },
   escalatedTo: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  escalatedToId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+  },
+  escalatedToName: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  escalatedToRole: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  escalationReviewer: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  escalationReviewerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+  },
+  escalatedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+  },
+  escalatedByName: {
+    type: String,
+    default: '',
+    trim: true,
+  },
+  escalatedByRole: {
     type: String,
     default: '',
     trim: true,
@@ -340,6 +515,21 @@ const complaintSchema = new mongoose.Schema({
     url: { type: String, default: '' },
     helpful: { type: Boolean, default: true },
   },
+  emailNotifications: {
+    customer: {
+      recipient: { type: String, default: '' },
+      status: { type: String, enum: ['Sent Successfully', 'Failed', 'Pending'], default: 'Pending' },
+      sentAt: { type: Date, default: null },
+      error: { type: String, default: '' },
+    },
+    manager: {
+      recipient: { type: String, default: '' },
+      recipientName: { type: String, default: '' },
+      status: { type: String, enum: ['Sent Successfully', 'Failed', 'Pending'], default: 'Pending' },
+      sentAt: { type: Date, default: null },
+      error: { type: String, default: '' },
+    },
+  },
   // Sub-document arrays
   activities: [activitySchema],
   assignmentHistory: [assignmentHistorySchema],
@@ -355,6 +545,21 @@ const complaintSchema = new mongoose.Schema({
       timestamp: { type: Date, default: Date.now },
     },
   ],
+  // File & Screenshot Attachments
+  attachments: [
+    {
+      name: { type: String, default: '', trim: true },
+      size: { type: Number, default: 0 },
+      type: { type: String, default: '', trim: true },
+      dataUrl: { type: String, default: '' },
+      uploadedAt: { type: Date, default: Date.now },
+    },
+  ],
+  // Submitter Geolocation & Origin (Hybrid GPS with Silent IP Fallback)
+  location: {
+    type: locationSchema,
+    default: null,
+  },
   resolvedAt: {
     type: Date,
     default: null,
@@ -408,6 +613,7 @@ complaintSchema.pre('save', function (next) {
 
 complaintSchema.index({ status: 1 });
 complaintSchema.index({ priority: 1 });
+complaintSchema.index({ customerId: 1 });
 complaintSchema.index({ assignedTo: 1 });
 complaintSchema.index({ user: 1 });
 complaintSchema.index({ customerEmail: 1 });

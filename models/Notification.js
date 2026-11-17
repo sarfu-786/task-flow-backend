@@ -41,6 +41,37 @@ const notificationSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Complaint',
   },
+  complaintTicketNumber: {
+    type: String,
+    default: '',
+  },
+  ticketNumber: {
+    type: String,
+    default: '',
+  },
+  customerName: {
+    type: String,
+    default: '',
+  },
+  priority: {
+    type: String,
+    default: '',
+  },
+  escalatedBy: {
+    type: String,
+    default: '',
+  },
+  escalatedById: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+  },
+  escalationReason: {
+    type: String,
+    default: '',
+  },
+  escalatedAt: {
+    type: Date,
+  },
   projectId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Project',
@@ -75,8 +106,8 @@ const notificationSchema = new mongoose.Schema({
   },
   forRole: {
     type: String,
-    enum: ['Super Admin', 'Manager', 'User', 'All'],
-    default: 'Manager',
+    enum: ['Super Admin', 'Manager', 'User', 'All', 'DirectRecipientOnly', null],
+    default: 'DirectRecipientOnly',
   },
   createdAt: {
     type: Date,
@@ -87,6 +118,7 @@ const notificationSchema = new mongoose.Schema({
 // Production Indexes for notification lookup & badge counts
 notificationSchema.index({ recipientUser: 1, isRead: 1, createdAt: -1 });
 notificationSchema.index({ recipientName: 1, isRead: 1 });
+notificationSchema.index({ type: 1, recipientUser: 1, createdAt: -1 });
 notificationSchema.index({ user: 1, createdAt: -1 });
 notificationSchema.index({ forRole: 1, isRead: 1, createdAt: -1 });
 notificationSchema.index({ taskId: 1 });

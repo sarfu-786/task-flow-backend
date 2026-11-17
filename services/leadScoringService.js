@@ -267,20 +267,24 @@ const findDuplicateLead = (leadData, existingLeads = [], excludeLeadId = null) =
 
   const normEmail = normalizeEmail(leadData.email);
   const normPhone = normalizePhone(leadData.phone || leadData.mobileNumber);
-  const normCompany = normalizeText(leadData.company);
-  const normName = normalizeText(leadData.name || leadData.contactPerson);
 
   const cleanExcludeId = excludeLeadId ? excludeLeadId.toString().trim() : null;
 
   for (const lead of existingLeads) {
     if (!lead || lead.is_deleted) continue;
 
-    const currentLeadId = (lead._id ? lead._id.toString() : (lead.leadId || lead.lead_id || '')).trim();
-    if (cleanExcludeId && (currentLeadId === cleanExcludeId || (lead.leadId && lead.leadId === cleanExcludeId) || (lead.lead_id && lead.lead_id === cleanExcludeId))) {
-      continue;
+    const leadIdStr = lead._id ? lead._id.toString().trim() : '';
+    const leadCustomId = (lead.leadId || lead.lead_id || '').toString().trim();
+    if (cleanExcludeId) {
+      if (
+        (leadIdStr && leadIdStr.toLowerCase() === cleanExcludeId.toLowerCase()) ||
+        (leadCustomId && leadCustomId.toLowerCase() === cleanExcludeId.toLowerCase())
+      ) {
+        continue;
+      }
     }
 
-    // 1. Exact Email Match
+    // 1. Exact Email Match (Only when both have valid email)
     if (normEmail && lead.email && normalizeEmail(lead.email) === normEmail) {
       return {
         isDuplicate: true,
@@ -307,21 +311,6 @@ const findDuplicateLead = (leadData, existingLeads = [], excludeLeadId = null) =
           matchValue: lead.phone || lead.mobileNumber,
           matchingLead: lead,
           reason: `Matches existing lead ${lead.leadId || lead.name} with identical phone: ${lead.phone || lead.mobileNumber}`,
-        };
-      }
-    }
-
-    // 3. Company + Contact Person Name Match (both fields non-empty & matching)
-    if (normCompany && normCompany.length > 2 && normName && normName.length > 2) {
-      const existingComp = normalizeText(lead.company);
-      const existingName = normalizeText(lead.name || lead.contactPerson);
-      if (existingComp === normCompany && existingName === normName) {
-        return {
-          isDuplicate: true,
-          matchType: 'Company and Contact',
-          matchValue: `${lead.company} - ${lead.contactPerson || lead.name}`,
-          matchingLead: lead,
-          reason: `Matches existing lead ${lead.leadId || lead.name} with identical Company "${lead.company}" and Contact "${lead.contactPerson || lead.name}"`,
         };
       }
     }

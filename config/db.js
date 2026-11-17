@@ -14,6 +14,27 @@ if (!fs.existsSync(DATA_DIR)) {
   }
 }
 
+// Exclude test/dummy AI accounts
+const AI_EXCLUDED_EMAILS = new Set([
+  'sarfu@gmail.com',
+  'admin@taskflow.com',
+  'rohan.verma@taskflow.com',
+  'ananya.iyer@taskflow.com',
+  'vikram.malhotra@taskflow.com',
+  'neha.gupta@taskflow.com',
+  'rajesh.kothari@taskflow.com',
+  'kavita.reddy@taskflow.com',
+  'sarah.test1788242656501@example.com',
+  'manager.1788243837519@company.com',
+  'emma.1788243837519@company.com',
+]);
+
+const isAiExcludedEmail = (email) => {
+  if (!email) return false;
+  const clean = email.toLowerCase().trim();
+  return AI_EXCLUDED_EMAILS.has(clean) || clean.endsWith('@taskflow.com') || clean.endsWith('@company.com') || clean.endsWith('@example.com');
+};
+
 // In-memory & Persistent File-backed fallback data store
 const fallbackStore = {
   users: [],
@@ -45,15 +66,81 @@ const fallbackStore = {
     this._isFallback = val;
   },
 
+  loadBackupLeads() {
+    try {
+      const backupPath = path.join(__dirname, '../backups/taskflow_backup_2026-10-06T07-23-51-630Z.json');
+      if (fs.existsSync(backupPath)) {
+        const raw = fs.readFileSync(backupPath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed.leads) && parsed.leads.length > 0) {
+          const isFake = (l) => {
+            if (!l) return true;
+            const n = (l.name || l.contactPerson || '').trim();
+            const e = (l.email || '').trim().toLowerCase();
+            const id = (l._id || '').toString();
+            const c = (l.company || '').trim();
+            if (/Aarav Verma_\d+/i.test(n)) return true;
+            if (/Cold Prospect_\d+/i.test(n)) return true;
+            if (/MIS Test Enterprise/i.test(n)) return true;
+            if (/Confidential Enterprise Lead/i.test(n)) return true;
+            if (/Unqualified Test Lead/i.test(n)) return true;
+            if (/Vikram Malhotra/i.test(n)) return true;
+            if (/Customer With No Email/i.test(n)) return true;
+            if (/Isolated Hierarchy Customer Inc/i.test(n)) return true;
+            if (/lead_no_email_/i.test(id)) return true;
+            if (/vikram_179/i.test(e)) return true;
+            if (/vikram\.m@acmeapex/i.test(e)) return true;
+            if (/smallshop\.com/i.test(e)) return true;
+            if (/entcorp\.com/i.test(e)) return true;
+            if (/Acme Apex Corp/i.test(c)) return true;
+            return false;
+          };
+
+          const genuine = parsed.leads.filter((l) => !isFake(l));
+          const allUsers = this.users || parsed.users || [];
+          const assignments = {
+            'LD-001': 'shoaib',
+            'LD-002': 'arif',
+            'LD-003': 'saifi',
+            'LD-018': 'wasil',
+            'LD-019': 'exam',
+          };
+          genuine.forEach((l) => {
+            const lid = l.leadId || l.lead_id;
+            if (lid && assignments[lid]) {
+              const targetU = allUsers.find((u) => u.username === assignments[lid]);
+              if (targetU) {
+                l.user = targetU._id;
+                l.assignedTo = targetU.name;
+                l.assignedSalesUser = targetU.name;
+                l.assignedToId = targetU._id;
+              }
+            }
+          });
+          return genuine;
+        }
+      }
+    } catch (e) {
+      console.warn('[Storage Notice] Could not load backup leads:', e.message);
+    }
+    return [];
+  },
+
   saveToFile() {
     try {
       if (!fs.existsSync(DATA_DIR)) {
         fs.mkdirSync(DATA_DIR, { recursive: true });
       }
+      if (!this.leads || this.leads.length === 0) {
+        this.leads = this.loadBackupLeads();
+      }
+      if (Array.isArray(this.users)) {
+        this.users = this.users.filter((u) => !isAiExcludedEmail(u.email));
+      }
       const payload = {
-        users: this.users,
-        tasks: this.tasks,
-        notifications: this.notifications,
+        users: (this.users || []).filter((u) => !isAiExcludedEmail(u.email)),
+        tasks: this.tasks || [],
+        notifications: this.notifications || [],
         leads: this.leads || [],
         opportunities: this.opportunities || [],
         complaints: this.complaints || [],
@@ -80,10 +167,39 @@ const fallbackStore = {
         const raw = fs.readFileSync(DATA_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
         if (parsed && Array.isArray(parsed.users)) {
-          this.users = parsed.users;
+          this.users = parsed.users.filter((u) => !isAiExcludedEmail(u.email));
+
+          // Ensure reportsTo IDs match active user _id based on reportsToName
+          const userById = new Map();
+          const userByName = new Map();
+          this.users.forEach((u) => {
+            if (u._id) userById.set(u._id.toString(), u);
+            if (u.name) userByName.set(u.name.toLowerCase().trim(), u);
+          });
+          const superAdminUser = this.users.find((u) => u.role === 'Super Admin' || (u.roles && u.roles.includes('Super Admin')));
+          let needsSave = false;
+          this.users.forEach((u) => {
+            if (u.role === 'Manager' && (!u.reportsTo || !u.reportsToName) && superAdminUser && u._id !== superAdminUser._id) {
+              u.reportsTo = superAdminUser._id;
+              u.reportsToName = `${superAdminUser.name} (${superAdminUser.role || 'Super Admin'})`;
+              needsSave = true;
+            } else if (u.reportsToName) {
+              const rawRName = (u.reportsToName || '').toLowerCase().trim();
+              const cleanRName = rawRName.replace(/\s*\([^)]*\)/g, '').trim();
+              const parent = (u.reportsTo && userById.get(u.reportsTo.toString())) || userByName.get(cleanRName) || userByName.get(rawRName);
+              if (parent && parent._id && u.reportsTo !== parent._id.toString()) {
+                u.reportsTo = parent._id.toString();
+                needsSave = true;
+              }
+            }
+          });
+          if (needsSave) {
+            this.saveToFile();
+          }
+
           this.tasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
           this.notifications = Array.isArray(parsed.notifications) ? parsed.notifications : [];
-          this.leads = Array.isArray(parsed.leads) ? parsed.leads : [];
+          this.leads = Array.isArray(parsed.leads) && parsed.leads.length > 0 ? parsed.leads : this.loadBackupLeads();
           this.opportunities = Array.isArray(parsed.opportunities) ? parsed.opportunities : [];
           this.complaints = Array.isArray(parsed.complaints) ? parsed.complaints : [];
           this.projects = Array.isArray(parsed.projects) ? parsed.projects : [];

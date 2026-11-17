@@ -5,11 +5,55 @@ const Task = require('../models/Task');
 const { protect } = require('../middleware/auth');
 const { fallbackStore } = require('../config/db');
 
+const AI_EXCLUDED_EMAILS = new Set([
+  'sarfu@gmail.com',
+  'admin@taskflow.com',
+  'rohan.verma@taskflow.com',
+  'ananya.iyer@taskflow.com',
+  'vikram.malhotra@taskflow.com',
+  'neha.gupta@taskflow.com',
+  'rajesh.kothari@taskflow.com',
+  'kavita.reddy@taskflow.com',
+  'sarah.test1788242656501@example.com',
+  'manager.1788243837519@company.com',
+  'emma.1788243837519@company.com',
+]);
+
+const AI_EXCLUDED_NAMES = new Set([
+  'sarfu',
+  'priya patel',
+  'rohan verma',
+  'ananya iyer',
+  'vikram malhotra',
+  'neha gupta',
+  'rajesh kothari',
+  'kavita reddy',
+  'sarah connor',
+  'manager mark',
+  'employee emma',
+]);
+
+const isAiExcludedUser = (u) => {
+  if (!u) return true;
+  const e = (u.email || '').toLowerCase().trim();
+  const n = (u.name || '').toLowerCase().trim();
+  if (AI_EXCLUDED_EMAILS.has(e)) return true;
+  if (e.endsWith('@taskflow.com') || e.endsWith('@company.com') || e.endsWith('@example.com')) return true;
+  for (const exName of AI_EXCLUDED_NAMES) {
+    if (n === exName || n.startsWith(exName)) return true;
+  }
+  return false;
+};
+
 /**
  * Builds a dynamic organizational hierarchy tree from an array of users and tasks.
  * Calculates teamCount, taskCount, tasksBreakdown, and the complete reportingChain.
  */
 const buildHierarchyTree = (users, tasks, targetRootUserId = null) => {
+  // Strictly filter out any dummy / AI accounts and inactive users
+  users = (users || []).filter((u) => !isAiExcludedUser(u) && u.status !== 'Rejected' && u.status !== 'Pending');
+  tasks = (tasks || []).filter((t) => !isAiExcludedUser({ name: t.assignedTo, email: '' }));
+
   // Map users by ID and by lowercase name/username for robust lookup
   const userMap = new Map();
   const idMap = new Map();
@@ -76,9 +120,20 @@ const buildHierarchyTree = (users, tasks, targetRootUserId = null) => {
         avatar: current.avatar || '',
       });
 
-      if (!current.reportsTo) break;
-      const repId = current.reportsTo.toString();
-      const nextParent = idMap.get(repId);
+      if (!current.reportsTo && !current.reportsToName) break;
+      const repId = current.reportsTo ? (current.reportsTo._id ? current.reportsTo._id.toString() : current.reportsTo.toString()) : '';
+      const rawRName = (current.reportsToName || '').toLowerCase().trim();
+      const cleanRName = rawRName.replace(/\s*\([^)]*\)/g, '').trim();
+
+      let nextParent = null;
+      if (repId && idMap.has(repId)) {
+        nextParent = idMap.get(repId);
+      } else if (cleanRName && userMap.has(cleanRName)) {
+        nextParent = userMap.get(cleanRName);
+      } else if (rawRName && userMap.has(rawRName)) {
+        nextParent = userMap.get(rawRName);
+      }
+
       if (!nextParent || nextParent._id.toString() === current._id.toString()) break;
       current = nextParent;
     }
@@ -94,13 +149,29 @@ const buildHierarchyTree = (users, tasks, targetRootUserId = null) => {
     const rawRName = (u.reportsToName || '').toLowerCase().trim();
     const cleanRName = rawRName.replace(/\s*\([^)]*\)/g, '').trim();
 
-    if (rIdStr && (idMap.has(rIdStr) || targetRootUserId)) {
+    // Priority 1: Match parent via valid ID in idMap
+    if (rIdStr && idMap.has(rIdStr)) {
       repId = rIdStr;
-    } else if (cleanRName && userMap.has(cleanRName)) {
+    }
+    // Priority 2: Match parent via clean name in userMap (e.g. 'asif' from 'Asif (Manager)')
+    else if (cleanRName && userMap.has(cleanRName)) {
       repId = userMap.get(cleanRName)._id.toString();
-    } else if (rawRName && userMap.has(rawRName)) {
+    }
+    // Priority 3: Match parent via raw name in userMap
+    else if (rawRName && userMap.has(rawRName)) {
       repId = userMap.get(rawRName)._id.toString();
-    } else if (u.createdBy && idMap.has(u.createdBy.toString())) {
+    }
+    // Priority 4: If rIdStr matches any user's ID
+    else if (rIdStr) {
+      const found = users.find((x) => x && (x._id?.toString() === rIdStr || x.id?.toString() === rIdStr));
+      if (found) {
+        repId = found._id.toString();
+      } else if (u.createdBy && idMap.has(u.createdBy.toString())) {
+        repId = u.createdBy.toString();
+      }
+    }
+    // Priority 5: Fallback to createdBy
+    else if (u.createdBy && idMap.has(u.createdBy.toString())) {
       repId = u.createdBy.toString();
     }
 
@@ -246,14 +317,16 @@ router.get('/', protect, async (req, res) => {
     let allTasks = [];
 
     if (fallbackStore.isFallback) {
-      allUsers = fallbackStore.users.filter((u) => u.status !== 'Rejected' && u.status !== 'Pending');
-      allTasks = fallbackStore.tasks || [];
+      allUsers = fallbackStore.users.filter((u) => !isAiExcludedUser(u) && u.status !== 'Rejected' && u.status !== 'Pending');
+      allTasks = (fallbackStore.tasks || []).filter((t) => !isAiExcludedUser({ name: t.assignedTo, email: '' }));
     } else {
-      allUsers = await User.find({ status: { $nin: ['Rejected', 'Pending'] } })
+      const rawUsers = await User.find({ status: { $nin: ['Rejected', 'Pending'] } })
         .select('-password')
         .sort({ createdAt: 1 })
         .lean();
-      allTasks = await Task.find({}).lean();
+      allUsers = rawUsers.filter((u) => !isAiExcludedUser(u));
+      const rawTasks = await Task.find({}).lean();
+      allTasks = rawTasks.filter((t) => !isAiExcludedUser({ name: t.assignedTo, email: '' }));
     }
 
     const isSuperAdmin = req.user && req.user.role === 'Super Admin';
@@ -297,12 +370,14 @@ router.get('/', protect, async (req, res) => {
           avatar: curr.avatar || '',
         });
 
-        if (!curr.reportsTo) break;
-        const repId = (curr.reportsTo._id ? curr.reportsTo._id.toString() : curr.reportsTo.toString()).trim();
+        if (!curr.reportsTo && !curr.reportsToName) break;
+        const repId = curr.reportsTo ? (curr.reportsTo._id ? curr.reportsTo._id.toString() : curr.reportsTo.toString()).trim() : '';
         const repName = (curr.reportsToName || '').toLowerCase().trim();
+        const cleanRepName = repName.replace(/\s*\([^)]*\)/g, '').trim();
         const nextParent = allUsers.find(
           (u) =>
-            (u._id && u._id.toString() === repId) ||
+            (repId && u._id && u._id.toString() === repId) ||
+            (cleanRepName && u.name && u.name.toLowerCase().trim() === cleanRepName) ||
             (repName && u.name && u.name.toLowerCase().trim() === repName)
         );
         if (!nextParent || (nextParent._id && nextParent._id.toString() === cId)) break;
@@ -325,7 +400,12 @@ router.get('/', protect, async (req, res) => {
             if (uId === currentUserIdStr) return false;
             const rId = u.reportsTo ? (u.reportsTo._id ? u.reportsTo._id.toString() : u.reportsTo.toString()) : '';
             const rName = (u.reportsToName || '').toLowerCase().trim();
-            return (supIdStr && rId === supIdStr) || (supName && rName === supName);
+            const cleanRName = rName.replace(/\s*\([^)]*\)/g, '').trim();
+            return (
+              (supIdStr && rId === supIdStr) ||
+              (supName && cleanRName && cleanRName === supName) ||
+              (supName && rName && rName.includes(supName))
+            );
           })
           .map((u) => {
             const uTasks = allTasks.filter(
@@ -436,11 +516,12 @@ router.get('/chain/:userId', protect, async (req, res) => {
     let allUsers = [];
 
     if (fallbackStore.isFallback) {
-      allUsers = fallbackStore.users.filter((u) => u.status !== 'Rejected' && u.status !== 'Pending');
+      allUsers = fallbackStore.users.filter((u) => !isAiExcludedUser(u) && u.status !== 'Rejected' && u.status !== 'Pending');
     } else {
-      allUsers = await User.find({ status: { $nin: ['Rejected', 'Pending'] } })
+      const rawUsers = await User.find({ status: { $nin: ['Rejected', 'Pending'] } })
         .select('-password')
         .lean();
+      allUsers = rawUsers.filter((u) => !isAiExcludedUser(u));
     }
 
     // Hierarchy authorization check
@@ -504,13 +585,15 @@ router.get('/subordinates/:userId', protect, async (req, res) => {
     let allTasks = [];
 
     if (fallbackStore.isFallback) {
-      allUsers = fallbackStore.users.filter((u) => u.status !== 'Rejected' && u.status !== 'Pending');
-      allTasks = fallbackStore.tasks || [];
+      allUsers = fallbackStore.users.filter((u) => !isAiExcludedUser(u) && u.status !== 'Rejected' && u.status !== 'Pending');
+      allTasks = (fallbackStore.tasks || []).filter((t) => !isAiExcludedUser({ name: t.assignedTo, email: '' }));
     } else {
-      allUsers = await User.find({ status: { $nin: ['Rejected', 'Pending'] } })
+      const rawUsers = await User.find({ status: { $nin: ['Rejected', 'Pending'] } })
         .select('-password')
         .lean();
-      allTasks = await Task.find({}).lean();
+      allUsers = rawUsers.filter((u) => !isAiExcludedUser(u));
+      const rawTasks = await Task.find({}).lean();
+      allTasks = rawTasks.filter((t) => !isAiExcludedUser({ name: t.assignedTo, email: '' }));
     }
 
     // Hierarchy authorization check

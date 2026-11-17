@@ -473,11 +473,24 @@ const createFollowUpNotification = async ({
 };
 
 // @route   POST /api/leads/check-duplicate
-// @desc    Detect potential duplicate leads based on email, phone, or company+contact with hierarchy permission filtering
+// @desc    Detect potential duplicate leads based strictly on identical email or phone number
 // @access  Private
 router.post('/check-duplicate', protect, async (req, res) => {
   try {
-    const { email, phone, mobileNumber, company, name, contactPerson, excludeLeadId } = req.body;
+    const { email, phone, mobileNumber, company, name, contactPerson, excludeLeadId, excludeId } = req.body;
+    const cleanExcludeId = excludeLeadId || excludeId || req.body.id || req.body._id || null;
+
+    const targetEmail = (email || '').trim();
+    const targetPhone = (phone || mobileNumber || '').trim();
+
+    // Strict constraint: only check for duplicate if email or phone is entered
+    if (!targetEmail && !targetPhone) {
+      return res.json({
+        success: true,
+        isDuplicate: false,
+        matches: [],
+      });
+    }
 
     let existingLeads = [];
     let allUsers = [];
@@ -490,9 +503,9 @@ router.post('/check-duplicate', protect, async (req, res) => {
     }
 
     const dupResult = findDuplicateLead(
-      { email, phone: phone || mobileNumber, company, name: name || contactPerson, contactPerson: contactPerson || name },
+      { email: targetEmail, phone: targetPhone, mobileNumber: targetPhone, company, name: name || contactPerson, contactPerson: contactPerson || name },
       existingLeads,
-      excludeLeadId
+      cleanExcludeId
     );
 
     if (!dupResult.isDuplicate || !dupResult.matchingLead) {
@@ -1557,8 +1570,19 @@ router.get('/', protect, async (req, res) => {
             { assignedSalesUser: { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) } },
             { user: { $in: [req.user._id, ...subordinateIds] } },
             { assignedBy: new RegExp(escapeRegex(userName), 'i') },
-            { is_high_priority_pool: true },
-            { assignedTo: 'Unassigned (High-Priority Queue)' },
+            {
+              $and: [
+                { status: { $ne: 'Converted' } },
+                { opportunityId: null },
+                { convertedOpportunityId: null },
+                {
+                  $or: [
+                    { is_high_priority_pool: true },
+                    { assignedTo: 'Unassigned (High-Priority Queue)' },
+                  ],
+                },
+              ],
+            },
           ],
         });
       }
@@ -1718,7 +1742,19 @@ router.get('/stats', protect, async (req, res) => {
             { assignedSalesUser: { $in: names.map(n => new RegExp('^' + escapeRegex(n) + '$', 'i')) } },
             { user: { $in: [req.user._id, ...subordinateIds] } },
             { assignedBy: new RegExp(escapeRegex(userName), 'i') },
-            { is_high_priority_pool: true },
+            {
+              $and: [
+                { status: { $ne: 'Converted' } },
+                { opportunityId: null },
+                { convertedOpportunityId: null },
+                {
+                  $or: [
+                    { is_high_priority_pool: true },
+                    { assignedTo: 'Unassigned (High-Priority Queue)' },
+                  ],
+                },
+              ],
+            },
           ],
         });
       }
@@ -3640,6 +3676,11 @@ router.post('/:id/convert', protect, async (req, res) => {
       targetLead.convertedAt = new Date();
       targetLead.convertedBy = req.user?._id || null;
       targetLead.convertedByName = req.user?.name || 'Sales User';
+      targetLead.is_high_priority_pool = false;
+      targetLead.sla_unassigned = false;
+      targetLead.assignedTo = oppAssignedTo;
+      targetLead.assignedSalesUser = oppAssignedTo;
+      targetLead.user = oppTargetUserId || req.user?._id || null;
 
       // Add visual timeline event
       if (!Array.isArray(targetLead.timeline)) targetLead.timeline = [];
@@ -3808,6 +3849,11 @@ router.post('/:id/convert', protect, async (req, res) => {
       targetLead.convertedAt = new Date();
       targetLead.convertedBy = req.user?._id || null;
       targetLead.convertedByName = req.user?.name || 'Sales User';
+      targetLead.is_high_priority_pool = false;
+      targetLead.sla_unassigned = false;
+      targetLead.assignedTo = oppAssignedTo;
+      targetLead.assignedSalesUser = oppAssignedTo;
+      targetLead.user = oppTargetUserId || req.user?._id || null;
 
       targetLead.timeline.push({
         eventId: 'EVT-' + Math.floor(1000 + Math.random() * 9000),
