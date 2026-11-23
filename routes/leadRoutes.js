@@ -1798,10 +1798,11 @@ router.get('/stats', protect, async (req, res) => {
     const followUpsByUserMap = {};
 
     userLeads.forEach((lead) => {
+      const isClosedLead = ['Converted', 'Not Interested', 'Invalid', 'Lost'].includes(lead.status);
       const flws = Array.isArray(lead.followups) ? lead.followups : [];
       flws.forEach((f) => {
         totalFollowUps++;
-        if (f.status === 'Completed') {
+        if (f.status === 'Completed' || isClosedLead) {
           completedFollowUps++;
         } else {
           pendingFollowUps++;
@@ -1988,6 +1989,7 @@ router.post('/', protect, async (req, res) => {
       phone,
       mobileNumber,
       email,
+      city = '',
       source = 'Website',
       requirement = '',
       status = 'New',
@@ -2087,6 +2089,7 @@ router.post('/', protect, async (req, res) => {
       phone: leadPhone,
       mobileNumber: leadPhone,
       email: (email || '').trim().toLowerCase(),
+      city: (city || '').trim(),
       source: (source || 'Website').trim(),
       campaign_source: (req.body.campaign_source || source || 'Website Direct').trim(),
       cost_per_lead: req.body.cost_per_lead !== undefined ? Number(req.body.cost_per_lead) : 0,
@@ -2224,6 +2227,7 @@ router.put('/:id', protect, async (req, res) => {
       phone,
       mobileNumber,
       email,
+      city,
       source,
       requirement,
       status,
@@ -2332,6 +2336,7 @@ router.put('/:id', protect, async (req, res) => {
         phone: leadPhone !== undefined ? leadPhone : existing.phone,
         mobileNumber: leadPhone !== undefined ? leadPhone : existing.mobileNumber || existing.phone,
         email: email !== undefined ? email.trim().toLowerCase() : existing.email,
+        city: city !== undefined ? city.trim() : existing.city || '',
         source: source !== undefined ? source.trim() : existing.source,
         campaign_source: req.body.campaign_source !== undefined ? req.body.campaign_source.trim() : (source !== undefined ? source.trim() : existing.campaign_source || existing.source),
         cost_per_lead: req.body.cost_per_lead !== undefined ? Number(req.body.cost_per_lead) : existing.cost_per_lead || 0,
@@ -2448,6 +2453,7 @@ router.put('/:id', protect, async (req, res) => {
         lead.mobileNumber = leadPhone;
       }
       if (email !== undefined) lead.email = email.trim().toLowerCase();
+      if (city !== undefined) lead.city = city.trim();
       if (source !== undefined) lead.source = source.trim();
       if (req.body.campaign_source !== undefined) lead.campaign_source = req.body.campaign_source.trim();
       if (req.body.cost_per_lead !== undefined) lead.cost_per_lead = Number(req.body.cost_per_lead);

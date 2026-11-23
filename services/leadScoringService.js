@@ -207,6 +207,16 @@ const getLeadFollowUpSummary = (lead) => {
     return { status: 'None', date: null, time: '', overdueDays: 0 };
   }
 
+  // Converted or closed leads should never show Overdue / Pending follow-up alerts
+  if (['Converted', 'Not Interested', 'Invalid', 'Lost'].includes(lead.status)) {
+    return {
+      status: lead.status === 'Converted' ? 'Completed' : 'None',
+      date: null,
+      time: '',
+      overdueDays: 0,
+    };
+  }
+
   const nextDate = lead.nextFollowUpDate || lead.next_followup_at;
   const nextTime = lead.nextFollowUpTime || '';
 

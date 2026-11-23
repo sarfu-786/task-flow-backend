@@ -126,7 +126,24 @@ const fallbackStore = {
     return [];
   },
 
-  saveToFile() {
+  _saveTimer: null,
+  saveToFile(immediate = false) {
+    if (immediate) {
+      if (this._saveTimer) {
+        clearTimeout(this._saveTimer);
+        this._saveTimer = null;
+      }
+      this._executeSave(true);
+      return;
+    }
+    if (this._saveTimer) return;
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      this._executeSave(false);
+    }, 150);
+  },
+
+  _executeSave(sync = false) {
     try {
       if (!fs.existsSync(DATA_DIR)) {
         fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -155,7 +172,15 @@ const fallbackStore = {
         },
         savedAt: new Date().toISOString(),
       };
-      fs.writeFileSync(DATA_FILE, JSON.stringify(payload, null, 2), 'utf-8');
+
+      const dataStr = JSON.stringify(payload, null, 2);
+      if (sync) {
+        fs.writeFileSync(DATA_FILE, dataStr, 'utf-8');
+      } else {
+        fs.writeFile(DATA_FILE, dataStr, 'utf-8', (err) => {
+          if (err) console.error('[Storage Error] Failed to persist data to disk:', err.message);
+        });
+      }
     } catch (err) {
       console.error('[Storage Error] Failed to persist data to disk:', err.message);
     }
@@ -382,9 +407,10 @@ const connectDB = async () => {
 
     await mongoose.connect(mongoURI, {
       serverSelectionTimeoutMS: 5000,
-      socketTimeoutMS: 30000,
+      socketTimeoutMS: 45000,
       family: 4,
-      maxPoolSize: 10,
+      maxPoolSize: process.env.MONGO_MAX_POOL_SIZE ? parseInt(process.env.MONGO_MAX_POOL_SIZE, 10) : 50,
+      minPoolSize: process.env.MONGO_MIN_POOL_SIZE ? parseInt(process.env.MONGO_MIN_POOL_SIZE, 10) : 5,
     });
 
     console.log(`[Database] MongoDB Connected Successfully to DB: ${mongoose.connection.name}`);

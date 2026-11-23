@@ -2246,44 +2246,45 @@ const matchDepartmentCategory = (category = '', department = '') => {
   // Compare without parenthetical notes
   const cleanCat = cat.replace(/\s*\([^)]*\)/g, '').trim();
   const cleanDept = dept.replace(/\s*\([^)]*\)/g, '').trim();
-  if (cleanCat && cleanDept && (cleanCat === cleanDept || cleanCat.includes(cleanDept) || cleanDept.includes(cleanCat))) {
+  if (cleanCat && cleanDept && cleanCat === cleanDept) {
     return true;
   }
 
+  // Strict 1-to-1 category routing (each rule returns immediately so specific categories never leak into Customer Support)
   // 1. Technical & IT Support
   if (cat.includes('technical') || cat.includes('it support') || cat.includes('backend') || cat.includes('system') || cat.includes('glitch') || cat.includes('crash') || cat.includes('freeze') || cat.includes('api') || cat.includes('database') || cat.includes('server') || cat.includes('hardware') || cat.includes('access') || cat.includes('2fa')) {
-    if (dept.includes('backend') || dept.includes('technical') || dept.includes('it support') || dept.includes('system') || dept.includes('engineer') || dept.includes('internet')) return true;
+    return dept.includes('backend') || dept.includes('technical') || dept.includes('it support') || dept.includes('system') || dept.includes('engineer') || dept.includes('development') || dept.includes('tech');
   }
-  // 2. Customer Support & Helpdesk
-  if (cleanCat.includes('customer support') || cleanCat.includes('helpdesk') || cleanCat.includes('general support') || cleanCat.includes('support') || cleanCat.includes('help') || cleanCat.includes('service') || cleanCat.includes('inquiry') || cleanCat.includes('grievance') || cleanCat.includes('assistance')) {
-    if (cleanDept.includes('customer support') || cleanDept.includes('helpdesk') || cleanDept.includes('support') || cleanDept.includes('service') || cleanDept.includes('social media')) return true;
+  // 2. Internet & Network Work
+  if (cat.includes('internet') || cat.includes('network') || cat.includes('wifi') || cat.includes('dns') || cat.includes('vpn') || cat.includes('bandwidth') || cat.includes('modem')) {
+    return dept.includes('internet') || dept.includes('network') || dept.includes('infrastructure') || dept.includes('telecom');
   }
   // 3. Sales & Business Development
   if (cat.includes('sell') || cat.includes('sale') || cat.includes('pricing') || cat.includes('quote') || cat.includes('commercial') || cat.includes('lead') || cat.includes('deal') || cat.includes('contract')) {
-    if (dept.includes('sell') || dept.includes('sale') || dept.includes('business development') || dept.includes('commercial')) return true;
+    return dept.includes('sell') || dept.includes('sale') || dept.includes('business development') || dept.includes('commercial');
   }
   // 4. Accounts & Billing
   if (cat.includes('bill') || cat.includes('payment') || cat.includes('invoice') || cat.includes('refund') || cat.includes('charge') || cat.includes('finance') || cat.includes('account') || cat.includes('tax') || cat.includes('gst')) {
-    if (dept.includes('account') || dept.includes('billing') || dept.includes('finance')) return true;
+    return dept.includes('account') || dept.includes('billing') || dept.includes('finance') || dept.includes('invoicing');
   }
   // 5. Operations & Field Logistics
-  if (cat.includes('operation') || cat.includes('logistic') || cat.includes('delivery') || cat.includes('shipment') || cat.includes('dispatch') || cat.includes('defect') || cat.includes('hardware') || cat.includes('damage') || cat.includes('product') || cat.includes('on-site')) {
-    if (dept.includes('operation') || dept.includes('logistic') || dept.includes('field') || dept.includes('dispatch') || dept.includes('quality')) return true;
+  if (cat.includes('operation') || cat.includes('logistic') || cat.includes('delivery') || cat.includes('shipment') || cat.includes('dispatch') || cat.includes('defect') || cat.includes('damage') || cat.includes('product') || cat.includes('on-site')) {
+    return dept.includes('operation') || dept.includes('logistic') || dept.includes('field') || dept.includes('dispatch') || dept.includes('supply chain');
   }
   // 6. Documentation & Quality
   if (cat.includes('document') || cat.includes('quality') || cat.includes('compliance') || cat.includes('audit') || cat.includes('back office') || cat.includes('kyc') || cat.includes('sop')) {
-    if (dept.includes('document') || dept.includes('quality') || dept.includes('back office')) return true;
+    return dept.includes('document') || dept.includes('quality') || dept.includes('back office') || dept.includes('compliance') || dept.includes('audit');
   }
   // 7. Social Media & Marketing
   if (cat.includes('social') || cat.includes('marketing') || cat.includes('campaign') || cat.includes('brand') || cat.includes('pr')) {
-    if (dept.includes('social') || dept.includes('marketing')) return true;
+    return dept.includes('social') || dept.includes('marketing') || dept.includes('brand');
   }
-  // 8. Internet & Network Work
-  if (cat.includes('internet') || cat.includes('network') || cat.includes('wifi') || cat.includes('dns') || cat.includes('vpn') || cat.includes('bandwidth') || cat.includes('modem')) {
-    if (dept.includes('internet') || dept.includes('network')) return true;
+  // 8. Customer Support & Helpdesk (checked last so "IT Support" / "Legacy Support" don't match here)
+  if (cleanCat.includes('customer support') || cleanCat.includes('helpdesk') || cleanCat.includes('general support') || cleanCat.includes('support') || cleanCat.includes('help') || cleanCat.includes('service') || cleanCat.includes('inquiry') || cleanCat.includes('grievance') || cleanCat.includes('assistance')) {
+    return cleanDept.includes('customer support') || cleanDept.includes('helpdesk') || cleanDept.includes('customer service') || cleanDept.includes('client support');
   }
 
-  return cat.includes(dept) || dept.includes(cat);
+  return cleanCat.length >= 4 && cleanDept.length >= 4 && (cleanCat.includes(cleanDept) || cleanDept.includes(cleanCat));
 };
 
 const matchLocationCity = (location = null, user = null) => {
@@ -2322,9 +2323,8 @@ const findAutoAssignee = (allUsers = [], complaints = [], category = '', locatio
     ).length;
 
     const skillMatched = matchDepartmentCategory(category, cand.department);
-    const locationMatched = matchLocationCity(location, cand);
 
-    // Check if candidate is currently out on a field service / active visit
+    // Check if candidate is currently handling an in-progress ticket
     const inProgressTicket = complaints.find(
       (c) =>
         (c.status === 'In Progress' || c.status === 'Under Investigation') &&
@@ -2334,11 +2334,10 @@ const findAutoAssignee = (allUsers = [], complaints = [], category = '', locatio
 
     let score = 0;
     if (skillMatched) score += 20;
-    if (locationMatched) score += 15;
     if (!inProgressTicket && count === 0) {
       score += 10; // Free and ready immediately
     } else if (inProgressTicket) {
-      score -= 5; // Currently engaged on customer site
+      score -= 5;
     }
     score -= count * 2;
 
@@ -2409,11 +2408,8 @@ router.post('/public', requireComplaintModule, async (req, res) => {
       }
     }
 
-    // 10/10 Hybrid Geolocation resolution
-    const resolvedLocation = await resolveComplaintLocation(location, req);
-
-    // Smart Auto-Assignment (Skill & Department Matching + Location Proximity + Workload Balancing)
-    const autoAgent = findAutoAssignee(allUsers, currentComplaints, category, resolvedLocation);
+    // Smart Auto-Assignment (Skill & Department Matching + Workload Balancing)
+    const autoAgent = findAutoAssignee(allUsers, currentComplaints, category);
     const finalAssignedTo = autoAgent ? (autoAgent._id || autoAgent.id) : null;
     const finalAssignedToName = autoAgent ? autoAgent.name : 'Customer Support Team';
     const finalTeam = autoAgent?.department || 'Customer Support';
@@ -2470,7 +2466,7 @@ router.post('/public', requireComplaintModule, async (req, res) => {
         team: finalTeam,
         createdBy: null,
         createdByName: 'Customer (Self-Service Portal)',
-        location: resolvedLocation,
+        location: null,
         attachments: cleanAttachments,
         activities: [
           {
@@ -2542,7 +2538,7 @@ router.post('/public', requireComplaintModule, async (req, res) => {
         team: finalTeam,
         createdBy: null,
         createdByName: 'Customer (Self-Service Portal)',
-        location: resolvedLocation,
+        location: null,
         attachments: cleanAttachments,
         activities: [
           {
@@ -2927,8 +2923,8 @@ router.post('/', protect, requireComplaintModule, async (req, res) => {
       }
     }
 
-    // 10/10 Hybrid Submitter Location Resolution (GPS with Silent IP Fallback)
-    const resolvedLocation = await resolveComplaintLocation(location, req);
+    // Location tracking disabled
+    const resolvedLocation = null;
 
     const cleanAttachments = Array.isArray(attachments)
       ? attachments.slice(0, 5).map((att) => ({

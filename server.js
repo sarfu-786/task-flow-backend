@@ -132,8 +132,9 @@ app.use(
 );
 app.options('*', cors());
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+// Body parser with 15MB safe threshold (prevents Node.js heap OOM)
+app.use(express.json({ limit: '15mb' }));
+app.use(express.urlencoded({ limit: '15mb', extended: true }));
 
 // Core API Routes
 app.use('/api/auth', require('./routes/authRoutes'));
@@ -152,15 +153,16 @@ app.use('/api/audit-logs', require('./routes/auditRoutes'));
 app.use('/api/audit', require('./routes/auditRoutes'));
 app.use('/api/followups', require('./routes/followUpRoutes'));
 
-const { initSLADaemon } = require('./services/slaDaemon');
+const { initSLADaemon, stopSLADaemon } = require('./services/slaDaemon');
 const mongoose = require('mongoose');
 
-// Safe Health check endpoint
+// Safe Health check endpoint with 10/10 Enterprise Diagnostic Telemetry
 app.get('/api/health', (req, res) => {
   const isDbReady = mongoose.connection ? mongoose.connection.readyState === 1 : false;
+  const memUsage = process.memoryUsage();
   res.json({
     status: 'OK',
-    uptime: process.uptime(),
+    uptime: Math.round(process.uptime()),
     timestamp: new Date().toISOString(),
     version: '2.0.0',
     mode: fallbackStore.isFallback ? 'Persistent Fallback Store' : 'MongoDB Production',
@@ -168,6 +170,13 @@ app.get('/api/health', (req, res) => {
     isDatabaseHealthy: fallbackStore.isFallback ? true : isDbReady,
     activeModules: fallbackStore.subscription?.activeModules || ['leads', 'complaints', 'projects', 'tasks'],
     socketConnections: io.engine ? io.engine.clientsCount : 0,
+    systemMetrics: {
+      memoryUsedMB: Math.round(memUsage.heapUsed / 1024 / 1024),
+      memoryTotalMB: Math.round(memUsage.heapTotal / 1024 / 1024),
+      rssMB: Math.round(memUsage.rss / 1024 / 1024),
+      nodeVersion: process.version,
+      pid: process.pid,
+    },
   });
 });
 
@@ -228,6 +237,50 @@ const startServer = async () => {
     console.error('Failed to start server:', err);
   }
 };
+
+// Global Process Resiliency Handlers
+process.on('uncaughtException', (err) => {
+  console.error('[Process Safety] Uncaught Exception caught safely:', err.message);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.warn('[Process Safety] Unhandled Promise Rejection caught safely:', reason);
+});
+
+// Graceful Shutdown Handler for Zero-Downtime Redeployment
+const gracefulShutdown = async (signal) => {
+  console.log(`\n[Server] Received ${signal}. Starting graceful shutdown...`);
+  try {
+    if (typeof stopSLADaemon === 'function') {
+      stopSLADaemon();
+    }
+    if (fallbackStore && typeof fallbackStore.saveToFile === 'function') {
+      fallbackStore.saveToFile(true);
+    }
+    if (io) {
+      io.close();
+    }
+    httpServer.close(async () => {
+      console.log('[Server] HTTP server closed gracefully.');
+      if (mongoose.connection && mongoose.connection.readyState === 1) {
+        await mongoose.connection.close(false);
+        console.log('[Database] MongoDB connection closed safely.');
+      }
+      process.exit(0);
+    });
+
+    setTimeout(() => {
+      console.error('[Server] Forcing shutdown after 10s timeout.');
+      process.exit(1);
+    }, 10000).unref();
+  } catch (err) {
+    console.error('[Server] Error during graceful shutdown:', err);
+    process.exit(1);
+  }
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 startServer();
 

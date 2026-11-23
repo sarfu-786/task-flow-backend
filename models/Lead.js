@@ -55,6 +55,11 @@ const leadSchema = new mongoose.Schema({
     lowercase: true,
     default: '',
   },
+  city: {
+    type: String,
+    trim: true,
+    default: '',
+  },
   requirement: {
     type: String,
     trim: true,
@@ -480,5 +485,10 @@ leadSchema.pre('save', function (next) {
 
   next();
 });
+
+leadSchema.index({ assignedToId: 1, status: 1 });
+leadSchema.index({ user: 1, status: 1 });
+leadSchema.index({ email: 1 });
+leadSchema.index({ phone: 1 });
 
 module.exports = mongoose.model('Lead', leadSchema);

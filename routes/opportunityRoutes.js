@@ -24,6 +24,7 @@ const VALID_STAGES = [
   'Closed Lost',
 ];
 const VALID_PRIORITIES = ['Low', 'Medium', 'High', 'Urgent'];
+const isClosedOpportunityStage = (st) => ['Won', 'Closed Won', 'Lost', 'Closed Lost'].includes(st);
 
 const DEFAULT_PROBABILITIES = {
   'New Opportunity': 10,
@@ -679,6 +680,13 @@ router.put('/:id', protect, async (req, res) => {
         });
       }
 
+      if (isClosedOpportunityStage(existing.stage)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Closed (Won/Lost) opportunities are locked and cannot be edited.',
+        });
+      }
+
       const targetStage = stage || existing.stage;
       const isWon = targetStage === 'Won' || targetStage === 'Closed Won';
       const isLost = targetStage === 'Lost' || targetStage === 'Closed Lost';
@@ -742,6 +750,13 @@ router.put('/:id', protect, async (req, res) => {
         return res.status(403).json({
           success: false,
           message: 'Forbidden: You do not have permission to edit this opportunity',
+        });
+      }
+
+      if (isClosedOpportunityStage(opportunity.stage)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Closed (Won/Lost) opportunities are locked and cannot be edited.',
         });
       }
 
@@ -888,6 +903,13 @@ router.patch('/:id/stage', protect, async (req, res) => {
         });
       }
 
+      if (isClosedOpportunityStage(existing.stage)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Closed (Won/Lost) opportunities are locked and their stage cannot be changed.',
+        });
+      }
+
       if (existing.stage !== stage) {
         existing.stage_entered_at = new Date();
         if (!existing.activity_history) existing.activity_history = [];
@@ -957,6 +979,13 @@ router.patch('/:id/stage', protect, async (req, res) => {
         return res.status(403).json({
           success: false,
           message: 'Forbidden: You do not have permission to advance or modify this deal',
+        });
+      }
+
+      if (isClosedOpportunityStage(opportunity.stage)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Closed (Won/Lost) opportunities are locked and their stage cannot be changed.',
         });
       }
 
@@ -1049,6 +1078,13 @@ router.delete('/:id', protect, async (req, res) => {
         });
       }
 
+      if (isClosedOpportunityStage(existing.stage)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Closed (Won/Lost) opportunities are locked and cannot be deleted.',
+        });
+      }
+
       const deleted = fallbackStore.opportunities.splice(oppIndex, 1)[0];
       fallbackStore.saveToFile();
 
@@ -1070,6 +1106,13 @@ router.delete('/:id', protect, async (req, res) => {
         return res.status(403).json({
           success: false,
           message: 'Forbidden: You do not have permission to delete this opportunity',
+        });
+      }
+
+      if (isClosedOpportunityStage(opportunity.stage)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Closed (Won/Lost) opportunities are locked and cannot be deleted.',
         });
       }
 

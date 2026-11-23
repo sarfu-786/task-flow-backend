@@ -111,6 +111,13 @@ const securityHeaders = (req, res, next) => {
   // Remove Express powered by header
   res.removeHeader('X-Powered-By');
 
+  // Prevent intermediate proxy caching of sensitive user & auth responses
+  if (req.originalUrl && (req.originalUrl.includes('/api/auth') || req.originalUrl.includes('/api/users'))) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
+
   next();
 };
 

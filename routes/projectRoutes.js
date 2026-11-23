@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const XLSX = require('xlsx');
 const Project = require('../models/Project');
 const User = require('../models/User');
@@ -109,8 +110,8 @@ const PROJECT_TEMPLATES = [
     name: 'Agile Software Product Delivery',
     category: 'Enterprise Software',
     description: 'End-to-end agile sprint delivery framework with discovery, sprint cycles, QA, and release management.',
-    defaultBudget: 45000,
-    currency: 'USD',
+    defaultBudget: 4500000,
+    currency: 'INR',
     billingType: 'Fixed Cost',
     phases: [
       { phaseId: 'PH-01', name: 'Discovery & Architecture', description: 'Requirements alignment and technical architecture design.', order: 1, status: 'Upcoming', progress: 0 },
@@ -138,8 +139,8 @@ const PROJECT_TEMPLATES = [
     name: 'Cloud Infrastructure & DevOps Migration',
     category: 'Cloud Migration',
     description: 'Structured cloud replatforming, VPC networking, container orchestration, and zero-downtime cutover.',
-    defaultBudget: 35000,
-    currency: 'USD',
+    defaultBudget: 2500000,
+    currency: 'INR',
     billingType: 'Time & Material',
     phases: [
       { phaseId: 'PH-01', name: 'Infrastructure Audit & Assessment', description: 'Inventory of current servers, dependencies, and sizing.', order: 1, status: 'Upcoming', progress: 0 },
@@ -164,8 +165,8 @@ const PROJECT_TEMPLATES = [
     name: 'Modern Web & Mobile Portal Redesign',
     category: 'Web Application',
     description: 'High-impact UI/UX overhaul with responsive design systems, accessibility, and speed optimizations.',
-    defaultBudget: 22000,
-    currency: 'USD',
+    defaultBudget: 1500000,
+    currency: 'INR',
     billingType: 'Fixed Cost',
     phases: [
       { phaseId: 'PH-01', name: 'UX Research & Wireframing', description: 'User persona mapping, Figma design tokens, and prototypes.', order: 1, status: 'Upcoming', progress: 0 },
@@ -1569,17 +1570,74 @@ router.post('/', async (req, res) => {
       if (matched) resolvedOwnerId = (matched._id || matched.id);
     }
 
-    let initialPhases = phases && phases.length > 0 ? phases : [];
-    let initialMilestones = milestones && milestones.length > 0 ? milestones : [];
-    let initialTasks = tasks && tasks.length > 0 ? tasks : [];
+    // Defensive normalization so legacy aliases / non-ObjectId IDs never cause 500 ValidationError/CastError
+    const safeObjectId = (val) => (val && mongoose.Types.ObjectId.isValid(val) ? val : null);
+    const VALID_PROJECT_TYPES = ['Client Deliverable', 'Internal Project', 'Retainer Service', 'Fixed Price Contract', 'Time & Material (T&M)'];
+    const VALID_STATUSES = ['Draft', 'Planning', 'Approved', 'In Progress', 'Under Review', 'On Hold', 'Completed', 'Closed', 'Cancelled'];
+    const VALID_BILLING_TYPES = ['Fixed Cost', 'Time & Material', 'Non-Billable'];
+    const VALID_BILLING_METHODS = ['Milestone Based', 'Hourly Rate', 'Fixed Monthly', 'Deliverable Sign-Off'];
+    const VALID_PHASE_STATUSES = ['Upcoming', 'In Progress', 'Completed', 'On Hold'];
+    const VALID_MILESTONE_STATUSES = ['Upcoming', 'In Progress', 'Completed', 'Delayed', 'On Hold'];
+
+    const normalizedProjectType = VALID_PROJECT_TYPES.includes(projectType)
+      ? projectType
+      : projectType === 'Internal Product'
+      ? 'Internal Project'
+      : 'Client Deliverable';
+    const normalizedStatus = VALID_STATUSES.includes(status)
+      ? status
+      : status === 'Active' || status === 'Active / In Progress'
+      ? 'In Progress'
+      : 'Planning';
+    const normalizedBillingType = VALID_BILLING_TYPES.includes(billingType)
+      ? billingType
+      : billingType === 'Time and Material'
+      ? 'Time & Material'
+      : 'Fixed Cost';
+    const normalizedBillingMethod = VALID_BILLING_METHODS.includes(billingMethod)
+      ? billingMethod
+      : billingMethod === 'Monthly Cycle'
+      ? 'Fixed Monthly'
+      : billingMethod === 'Upon Completion'
+      ? 'Deliverable Sign-Off'
+      : 'Milestone Based';
+
+    const sanitizePhases = (list) =>
+      (Array.isArray(list) ? list : []).map((p, idx) => ({
+        ...p,
+        name: (p.name || p.title || `Phase ${idx + 1}`).trim(),
+        order: Number(p.order) || idx + 1,
+        status: VALID_PHASE_STATUSES.includes(p.status) ? p.status : 'Upcoming',
+        progress: Number(p.progress) || 0,
+      }));
+
+    const sanitizeMilestones = (list) =>
+      (Array.isArray(list) ? list : []).map((m, idx) => ({
+        ...m,
+        title: (m.title || m.name || `Milestone ${idx + 1}`).trim(),
+        status: VALID_MILESTONE_STATUSES.includes(m.status) ? m.status : 'Upcoming',
+        isCompleted: Boolean(m.isCompleted || m.status === 'Completed'),
+        progress: Number(m.progress) || (m.status === 'Completed' ? 100 : 0),
+      }));
+
+    const sanitizeTasks = (list) =>
+      (Array.isArray(list) ? list : []).map((t, idx) => ({
+        ...t,
+        title: (t.title || t.taskName || t.name || `Task ${idx + 1}`).trim(),
+        estimatedHours: Number(t.estimatedHours) || 0,
+      }));
+
+    let initialPhases = phases && phases.length > 0 ? sanitizePhases(phases) : [];
+    let initialMilestones = milestones && milestones.length > 0 ? sanitizeMilestones(milestones) : [];
+    let initialTasks = tasks && tasks.length > 0 ? sanitizeTasks(tasks) : [];
 
     // Template application if selected
     if (templateId) {
       const tpl = PROJECT_TEMPLATES.find((t) => t.templateId === templateId);
       if (tpl) {
-        if (initialPhases.length === 0) initialPhases = tpl.phases;
-        if (initialMilestones.length === 0) initialMilestones = tpl.milestones;
-        if (initialTasks.length === 0) initialTasks = tpl.tasks;
+        if (initialPhases.length === 0) initialPhases = sanitizePhases(tpl.phases);
+        if (initialMilestones.length === 0) initialMilestones = sanitizeMilestones(tpl.milestones);
+        if (initialTasks.length === 0) initialTasks = sanitizeTasks(tpl.tasks);
       }
     }
 
@@ -1617,6 +1675,11 @@ router.post('/', async (req, res) => {
       },
     ];
 
+    const safeTeamMembers = (Array.isArray(teamMembers) ? teamMembers : []).map((tm) => ({
+      ...tm,
+      userId: safeObjectId(tm.userId),
+    }));
+
     let newProject;
     if (fallbackStore.isFallback) {
       const projectCode = generateProjectCode(fallbackStore.projects || []);
@@ -1626,34 +1689,34 @@ router.post('/', async (req, res) => {
         name: projectName,
         clientName: finalClientName,
         client: finalClientName,
-        clientId: clientId || null,
+        clientId: safeObjectId(clientId),
         leadId: leadId || '',
         opportunityId: opportunityId || '',
         description: description.trim(),
         category,
-        projectType,
+        projectType: normalizedProjectType,
         department,
-        status: status || (progress === 100 ? 'Completed' : progress > 0 ? 'In Progress' : 'Planning'),
+        status: normalizedStatus,
         priority,
         budget: Number(budget) || 0,
         plannedCost: Number(plannedCost || budget) || 0,
         actualCost: 0,
         budgetedHours: Number(budgetedHours) || 0,
         actualHours: 0,
-        currency,
-        billingType,
-        billingMethod,
+        currency: ['USD', 'INR'].includes(currency) ? currency : 'INR',
+        billingType: normalizedBillingType,
+        billingMethod: normalizedBillingMethod,
         estimatedCost: Number(estimatedCost) || 0,
         startDate: finalStartDate.toISOString(),
         targetDate: finalTargetDate.toISOString(),
         progress,
-        owner: resolvedOwnerId,
+        owner: safeObjectId(resolvedOwnerId),
         ownerName: resolvedOwnerName,
         projectOwner: resolvedOwnerName,
-        manager: resolvedManagerId,
+        manager: safeObjectId(resolvedManagerId),
         managerName: resolvedManagerName,
         projectManager: resolvedManagerName,
-        teamMembers: Array.isArray(teamMembers) ? teamMembers : [],
+        teamMembers: safeTeamMembers,
         phases: initialPhases,
         milestones: initialMilestones,
         tasks: initialTasks,
@@ -1675,41 +1738,45 @@ router.post('/', async (req, res) => {
       fallbackStore.saveToFile();
     } else {
       const allCount = await Project.countDocuments();
-      const projectCode = `PRJ-${(allCount + 1).toString().padStart(4, '0')}`;
+      let projectCode = `PRJ-${(allCount + 1).toString().padStart(4, '0')}`;
+      const existingWithCode = await Project.findOne({ projectCode }).lean();
+      if (existingWithCode) {
+        projectCode = `PRJ-${(allCount + 1).toString().padStart(4, '0')}-${Math.floor(100 + Math.random() * 900)}`;
+      }
 
       newProject = await Project.create({
         projectCode,
         name: projectName,
         clientName: finalClientName,
         client: finalClientName,
-        clientId: clientId || null,
+        clientId: safeObjectId(clientId),
         leadId: leadId || '',
         opportunityId: opportunityId || '',
         description: description.trim(),
         category,
-        projectType,
+        projectType: normalizedProjectType,
         department,
-        status: status || (progress === 100 ? 'Completed' : progress > 0 ? 'In Progress' : 'Planning'),
+        status: normalizedStatus,
         priority,
         budget: Number(budget) || 0,
         plannedCost: Number(plannedCost || budget) || 0,
         actualCost: 0,
         budgetedHours: Number(budgetedHours) || 0,
         actualHours: 0,
-        currency,
-        billingType,
-        billingMethod,
+        currency: ['USD', 'INR'].includes(currency) ? currency : 'INR',
+        billingType: normalizedBillingType,
+        billingMethod: normalizedBillingMethod,
         estimatedCost: Number(estimatedCost) || 0,
         startDate: finalStartDate,
         targetDate: finalTargetDate,
         progress,
-        owner: resolvedOwnerId,
+        owner: safeObjectId(resolvedOwnerId),
         ownerName: resolvedOwnerName,
         projectOwner: resolvedOwnerName,
-        manager: resolvedManagerId,
+        manager: safeObjectId(resolvedManagerId),
         managerName: resolvedManagerName,
         projectManager: resolvedManagerName,
-        teamMembers: Array.isArray(teamMembers) ? teamMembers : [],
+        teamMembers: safeTeamMembers,
         phases: initialPhases,
         milestones: initialMilestones,
         tasks: initialTasks,
@@ -1721,7 +1788,7 @@ router.post('/', async (req, res) => {
         comments: [],
         activityHistory: initialActivity,
         approvals: [],
-        createdBy: req.user._id,
+        createdBy: safeObjectId(req.user._id),
       });
       newProject = newProject.toObject();
     }
@@ -1753,7 +1820,12 @@ router.post('/', async (req, res) => {
     });
   } catch (err) {
     console.error('[Create Project Error]', err);
-    res.status(500).json({ success: false, message: 'Failed to create project', error: err.message });
+    const statusCode = err.name === 'ValidationError' || err.name === 'CastError' ? 400 : 500;
+    res.status(statusCode).json({
+      success: false,
+      message: err.message || 'Failed to create project',
+      error: err.message,
+    });
   }
 });
 
