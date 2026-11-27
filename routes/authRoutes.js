@@ -549,6 +549,7 @@ router.post('/login', loginRateLimiter, async (req, res) => {
         username: user.username,
         role: user.role || 'User',
         department: user.department || 'Operations',
+        phone: user.phone || '',
         avatar: user.avatar || '',
         reportsTo: user.reportsTo || null,
         reportsToName: user.reportsToName || '',
@@ -822,7 +823,7 @@ router.get('/me', protect, async (req, res) => {
 router.put('/profile', protect, async (req, res) => {
   try {
     const userId = req.user._id ? req.user._id.toString() : (req.user.id ? req.user.id.toString() : '');
-    const { name, email, username, department, avatar, password, newPassword } = req.body;
+    const { name, email, username, department, phone, avatar, password, newPassword } = req.body;
 
     const targetPassword = (newPassword && newPassword.trim()) ? newPassword.trim() : ((password && password.trim()) ? password.trim() : null);
 
@@ -918,6 +919,7 @@ router.put('/profile', protect, async (req, res) => {
         email: cleanEmail !== undefined ? cleanEmail : existing.email,
         username: cleanUsername !== undefined ? cleanUsername : existing.username,
         department: department !== undefined ? department.trim() : existing.department,
+        phone: phone !== undefined ? phone.trim() : (existing.phone || ''),
         avatar: avatar !== undefined ? avatar : existing.avatar,
         password: newHashedPassword,
       };
@@ -983,6 +985,7 @@ router.put('/profile', protect, async (req, res) => {
       if (cleanEmail !== undefined) user.email = cleanEmail;
       if (cleanUsername !== undefined) user.username = cleanUsername;
       if (department !== undefined) user.department = department.trim();
+      if (phone !== undefined) user.phone = phone.trim();
       if (avatar !== undefined) user.avatar = avatar;
       if (targetPassword) {
         user.password = targetPassword;
@@ -1003,6 +1006,7 @@ router.put('/profile', protect, async (req, res) => {
             email: user.email,
             username: user.username,
             department: user.department,
+            phone: user.phone || '',
             avatar: user.avatar,
             password: targetPassword ? user.password : fallbackStore.users[localIdx].password,
           };

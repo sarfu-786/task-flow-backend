@@ -293,6 +293,7 @@ router.post('/', protect, async (req, res) => {
       password,
       role = 'User',
       department,
+      phone,
       city,
       location,
       reportsTo,
@@ -449,6 +450,7 @@ router.post('/', protect, async (req, res) => {
         role: targetRole || userRoles[0],
         roles: userRoles,
         department: targetDept,
+        phone: (phone || req.body.phone || '').toString().trim(),
         city: (city || req.body.city || '').toString().trim(),
         location: (location || req.body.location || '').toString().trim(),
         avatar: req.body.avatar || '',
@@ -490,6 +492,7 @@ router.post('/', protect, async (req, res) => {
         password: userPassword,
         role: targetRole,
         department: targetDept,
+        phone: (phone || req.body.phone || '').toString().trim(),
         avatar: req.body.avatar || '',
         reportsTo: finalReportsTo,
         reportsToName: finalReportsToName,
@@ -604,6 +607,7 @@ router.put('/:id', protect, async (req, res) => {
       username,
       role,
       department,
+      phone,
       city,
       location,
       avatar,
@@ -738,6 +742,7 @@ router.put('/:id', protect, async (req, res) => {
         role: finalRole,
         roles: finalRoles,
         department: department !== undefined ? department.trim() : existing.department,
+        phone: phone !== undefined ? String(phone).trim() : (existing.phone || ''),
         city: city !== undefined ? city.trim() : (existing.city || ''),
         location: location !== undefined ? location.trim() : (existing.location || ''),
         avatar: avatar !== undefined ? avatar : existing.avatar,
@@ -799,6 +804,7 @@ router.put('/:id', protect, async (req, res) => {
       if (cleanUsername !== undefined) user.username = cleanUsername;
       if (isManagerOrAdmin && role) user.role = role;
       if (department !== undefined) user.department = department.trim();
+      if (phone !== undefined) user.phone = String(phone).trim();
       if (city !== undefined) user.city = city.trim();
       if (location !== undefined) user.location = location.trim();
       if (avatar !== undefined) user.avatar = avatar;
